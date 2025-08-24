@@ -1,10 +1,12 @@
-# MAGe‑LDR‑KL (ultra‑short README)
+## MAGe‑LDR‑KL
 
-**What**: 3‑head DeBERTa for Content/Organization/Language (5 classes each). Losses: MAGe‑LDR (mixture/uniform), ALDR‑KL, CE.
+3‑head DeBERTa-v3-large for Content/Organization/Language (5 classes each). Losses: MAGe‑LDR-KL (mixture/uniform), ALDR‑KL, CE.
 
-**Data**: TSV with `prompt`, `essay`, targets: `content`,`organization`,`language` (ints in 1..5). Default split: `splits/dress_seed42.json`.
+Trained on DREsS dataset with `prompt`, `essay` and targets: `content`,`organization`,`language` (ints in 1..5). Not included in the repository - available [here](https://haneul-yoo.github.io/dress/)
 
-## Quick smoke (1 epoch)
+Examples of runs:
+
+### Test run (1 epoch)
 ```bash
 python train.py \
   --loss mage --distribution mixture --lambda0 1 --alpha 2 --C 0.3 \
@@ -14,7 +16,7 @@ python train.py \
   --save_dir sweeps/smoke
 ```
 
-## Strong run (offline)
+## 3 epochs with batch size 2, gradiaent accumulation at 8:
 ```bash
 python train.py \
   --loss mage --distribution mixture --lambda0 1 --alpha 2 --C 0.3 \
@@ -32,13 +34,10 @@ python sweep.py --phase nested \
   --nested_k 5 --nested_j 1 --nested_seed 42 \
   --concurrency 2 --devices 0,1
 ```
-*Resumes by skipping inner jobs whose `metrics.json` already exists; writes nested split JSON under `sweeps/`.*
 
 ## Outputs per run
 - `best.pt`, `run_args.json`, `metrics.json` (val/test: acc, QWK, F1; overall micro‑F1).
 
-## Files
-`train.py`, `loss.py`, `modeling_multitask.py`, `data_utils.py`, `sweep.py`, `splits/`
 
 *Active research code; interfaces may evolve.*
 
