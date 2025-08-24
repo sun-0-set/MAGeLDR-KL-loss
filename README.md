@@ -1,4 +1,4 @@
-# MAGe‑LDR‑KL (ultra‑short README)
+# MAGe‑LDR‑KL
 
 **What**: 3‑head DeBERTa for Content/Organization/Language (5 classes each). Losses: MAGe‑LDR (mixture/uniform), ALDR‑KL, CE.
 
