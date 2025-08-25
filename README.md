@@ -11,7 +11,8 @@ Please find the output of the CV validation sweep [here](https://drive.google.co
 - Due to an issue with DeBERTa-v3 tokeniser, the sweep in the paper was run with a locally stored model+tokeniser. Please find a copy [here](https://drive.google.com/drive/folders/1dHv2SCq6ipWfsvLBC8axzUdDZfmeS1s4?usp=sharing) and store in ``../models/deberta-v3-large`` to replicate.
 
 The command used for training: **(please set ``--devices`` to the number of available GPUs and adjust ``--concurrency`` accordingly)**
-``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python sweep.py \
   --phase nested \
   --tsv ../data/DREsS/DREsS_New_cleaned.tsv \
@@ -23,7 +24,8 @@ python sweep.py \
   --final_epochs 15 \
   --batch_size 42 \
   --grad_accum 1 \
-  --lr 2e-5``
+  --lr 2e-5
+```
 
 
 Other examples:
