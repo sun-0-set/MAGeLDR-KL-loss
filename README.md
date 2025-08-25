@@ -2,7 +2,13 @@
 
 3‑head DeBERTa-v3-large for Content/Organization/Language (5 classes each). Losses: MAGe‑LDR-KL (mixture/uniform), ALDR‑KL, CE.
 
-Trained on DREsS dataset with `prompt`, `essay` and targets: `content`,`organization`,`language` (ints in 1..5). Not included in the repository - available [here](https://haneul-yoo.github.io/dress/)
+Trained on DREsS dataset with `prompt`, `essay` and targets: `content`,`organization`,`language` (ints in 1..5). Not included in the repository - available [here](https://haneul-yoo.github.io/dress/).
+
+Please find the output of the CV validation sweep [here](https://drive.google.com/drive/folders/1bOAcUg4I7NvRfZzBmdU1Imy1KLvNjYos?usp=drive_link).
+
+**Note:** 
+- The script expects the data file in ``../data/DREsS/DREsS_New_cleaned.tsv``. The file is created by ``preparation.ipynb`` (in the repository root) from the ``DREsS DREsS_New.tsv`` available at the address above.
+- Due to an issue with DeBERTa-v3 tokeniser, the sweep in the paper was run with a locally stored model+tokeniser. Please find a copy [here](https://drive.google.com/drive/folders/1dHv2SCq6ipWfsvLBC8axzUdDZfmeS1s4?usp=sharing) and store in ``../models/deberta-v3-large`` to replicate.
 
 Examples of runs:
 
