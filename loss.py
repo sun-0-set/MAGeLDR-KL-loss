@@ -13,7 +13,6 @@ from math import log, pi, sqrt
 
 class MAGe_LDRLoss(nn.Module):
 
-
   def __init__ (
     self, 
     Y: torch.Tensor, # true label column
@@ -27,7 +26,6 @@ class MAGe_LDRLoss(nn.Module):
     debug: bool = False,
     log_to_wandb: bool = False
     ):
-      
       
       
       def _trunc_disc_norm_grid(K):
@@ -66,6 +64,7 @@ class MAGe_LDRLoss(nn.Module):
       self.Y = (Y - level_offset).long().to(dev)
       N, self.κ = self.Y.shape
       self.K = K
+      self.Kκ = K**self.κ
       self.logK = log(K)
       self.κlogK = self.κ * self.logK
       φ = _trunc_disc_norm_grid(K)
@@ -167,21 +166,18 @@ class MAGe_LDRLoss(nn.Module):
       θ = (-q*.5 / (R*R*R)).acos() + ~a.signbit()*2*pi
       self._extrema_γ2 = (
         (
-          (
-            torch.tensor(([2], [-2]), dtype=torch.float64, device=dev)*pi + θ)*self._13rd
-          ).cos()*2*R - E2
-        ).T
+          (torch.tensor(([2], [-2]), dtype=torch.float64, device=dev)*pi + θ)*self._13rd
+        ).cos()*2*R - E2
+      ).T
       self._extrema_γ2[self._eq_m1] = torch.stack((
         torch.full_like(self._Ku[self._eq_m1], -torch.inf),
         -2 * self._Ku[self._eq_m1] / self._δK[self._eq_m1]
       ), dim=1)
 
 
-  def _outer_sum_heads(self, x: torch.Tensor, flat: bool = True) -> torch.Tensor:
+  def _outer_sum(self, x: torch.Tensor, flat: bool = True) -> torch.Tensor:
     """
     x: (B, κ, K)  →  broadcast-sum across heads.
-    - If x are per-head *log-probs* (log ψ_h or log q_h), result is log ψ_joint or log q_joint.
-    - If x are per-head *scores* (e.g., per-head logits already scaled/normalized), result is the joint score grid.
     Returns (B, K^κ) when flat=True, else (B, K, .., K).
     """
     B, κ, K = x.shape
@@ -221,11 +217,11 @@ class MAGe_LDRLoss(nn.Module):
 
     ν = ν.long()
 
-    # Gather per-ν constants (broadcasted to (B, κ))
-    msk  = self._eq_m1[ν]
-    δm       = self._δm[ν]
-    δm_sq    = self._δm_sq[ν]
-    δm_cu2   = self._δm_cu2[ν]
+    # Gather per-ν constants (broadcast to (B, κ))
+    msk = self._eq_m1[ν]
+    δm = self._δm[ν]
+    δm_sq = self._δm_sq[ν]
+    δm_cu2 = self._δm_cu2[ν]
     δv = self._δv[ν]  # (B, κ)
     Ku = self._Ku[ν]
     δK = self._δK[ν]
@@ -238,12 +234,12 @@ class MAGe_LDRLoss(nn.Module):
 
     ρ = torch.empty_like(ν, dtype=torch.float64)  # Initialize ρ tensor
 
-    # Case 1: equal-mean branch (Variance -> Kurtosis)
+    # Case 1: equal mean (Variance -> Kurtosis)
     b = δK[msk] / (2 * δv[msk].square() * γ2[msk].clamp_min(1e-12))
     D = (b.square() + (Ku[msk] - δK[msk]*ρ0[msk]) / (δv[msk].square() * γ2[msk].clamp_min(1e-12))).clamp_min(0).sqrt()
     ρ[msk] = (b + torch.where(b < (σ2[msk]/δv[msk]), D, -D) - ρ0[msk]).clamp(0, 1)
 
-    # Case 2: general branch (Mean -> Variance -> Skewness -> Kurtosis)
+    # Case 2: general (Mean -> Variance -> Skewness -> Kurtosis)
     # Skewness-based ρ_γ1
     k13 = ((γ1 * σ2.pow(1.5) / δm_cu2 - coef_s0) / (coef_s1_sqrt13**3) * 0.5).acos() * self._13rd
     m = k13.cos()
@@ -312,16 +308,16 @@ class MAGe_LDRLoss(nn.Module):
   def forward_mixture(self, y_pred, ids, update_state: bool = True):
     # y_pred: (B, κ==n_heads, n_levels)
 
-    λ0, K, α = self.λ0, self.K, self.α
+    λ0, K, Kκ, α = self.λ0, self.K, self.Kκ, self.α
     Y = self.Y[ids]  # (B, κ)
     B = y_pred.shape[0]
     λ = self.λ[ids] # (B)
-    
+    idx_true = (torch.arange(B, device=y_pred.device), *Y.unbind(1))
 
     # logits tensor normalised per head
     if self.softplus:
       y_pred = F.softplus(y_pred)
-    y_pred = F.normalize(y_pred, dim=2, p=1)*K
+    y_pred = F.normalize(y_pred, dim=(1,2), p=1)*Kκ
 
     with torch.no_grad():
       head_scores = y_pred.detach() / λ.view(-1,1,1).clamp_min(1e-12)
@@ -346,15 +342,15 @@ class MAGe_LDRLoss(nn.Module):
       l_bound = -mixture_min  
       λt = λ0 * (1 - kl_reg / (α * l_bound))
       λ_reg_loss = -.5*α*l_bound / λ0 * (self.λ[ids] - λ0).square()
-      joint_log_ψ = self._outer_sum_heads(log_ψ_h_new, flat=True) 
+      joint_log_ψ = self._outer_sum(log_ψ_h_new, flat=True) 
       
 
     # weights update
-    y_pred = self._outer_sum_heads(y_pred, flat=False)
-    y_true = y_pred[torch.arange(B, device=y_pred.device), *Y.unbind(1)].unsqueeze(1)
+    y_pred = self._outer_sum(y_pred, flat=False)
+    y_true = y_pred[*idx_true].unsqueeze(1)
     diff_logits = y_pred.view(B, -1) - y_true + self.thresholds[ids].view(B, -1)
     diff_logits_lam_fix = diff_logits / λt.unsqueeze(1).clamp_min(1e-12) + joint_log_ψ
-    logsumexp_weighted = torch.logsumexp(diff_logits_lam_fix, dim=1)
+    logsumexp_weighted = diff_logits_lam_fix.logsumexp(1)
     loss_lam_fix = λt * logsumexp_weighted + λ_reg_loss
     
     if update_state:
@@ -416,15 +412,16 @@ class MAGe_LDRLoss(nn.Module):
 
   def forward_uniform(self, y_pred, ids, update_state: bool = True):
     # y_pred: (B, κ==n_heads, n_levels)
-    λ0, K, logK, κlogK, α = self.λ0, self.K, self.logK, self.κlogK, self.α
+    λ0, Kκ, logK, κlogK, α = self.λ0, self.Kκ, self.logK, self.κlogK, self.α
     Y = self.Y[ids] 
     B = y_pred.shape[0]
-    λ = self.λ[ids] 
+    λ = self.λ[ids]
+    id_true = (torch.arange(B, device=y_pred.device), *Y.unbind(1))
 
     # logits tensor normalised per head
     if self.softplus:
       y_pred = F.softplus(y_pred)
-    y_pred = F.normalize(y_pred, dim=2, p=1)*K
+    y_pred = F.normalize(y_pred, dim=(1,2), p=1)*Kκ
 
     with torch.no_grad():
       head_scores = y_pred.detach() / λ.view(-1,1,1).clamp_min(1e-12) 
@@ -436,12 +433,12 @@ class MAGe_LDRLoss(nn.Module):
       λ_reg_loss = -.5*α*κlogK / λ0 * (λt - λ0).square()
 
     # weights update
-    y_pred = self._outer_sum_heads(y_pred, flat=False)
-    y_true = y_pred[torch.arange(B, device=y_pred.device), *Y.unbind(1)].unsqueeze(1)
+    y_pred = self._outer_sum(y_pred, flat=False)
+    y_true = y_pred[*id_true].unsqueeze(1)
     diff_logits = y_pred.view(B, -1) - y_true + self.thresholds[ids].view(B, -1)
     diff_logits_lam_fix = diff_logits / λt.unsqueeze(1).clamp_min(1e-12)
-    logsumexp_weighted = torch.logsumexp(diff_logits_lam_fix, dim=1)
-    loss_lam_fix = λt * logsumexp_weighted + λ_reg_loss
+    logsumexp = diff_logits_lam_fix.logsumexp(1)
+    loss_lam_fix = λt * logsumexp + λ_reg_loss
     
     if update_state:
       self.λ[ids] = λt.clamp_min(.0)

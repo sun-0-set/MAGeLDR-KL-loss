@@ -30,6 +30,6 @@ class DRESSDataset(Dataset):
 
     def get_all_targets_tensor(self):
         return torch.tensor(
-            self.df[["content", "organization", "language"]].to_numpy(copy=True),
+            self.df[TARGET_COLS].to_numpy(copy=True),
             dtype=torch.long
         )
