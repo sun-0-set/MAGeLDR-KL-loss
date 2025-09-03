@@ -15,7 +15,7 @@ class MAGe_LDRLoss(nn.Module):
 
   def __init__ (
     self, 
-    Y: torch.Tensor, # true label column
+    Y: torch.Tensor, # true label columns
     K: int, # number of classes
     distribution: str = 'mixture',
     level_offset: int = 0, 
@@ -453,7 +453,7 @@ class MultiHeadUnivariateALDR_KL(nn.Module):
 
   def __init__ (
     self, 
-    Y: torch.Tensor, # true label column
+    Y: torch.Tensor, # true label columns
     K: int, # number of classes
     level_offset: int = 0, 
     λ0: float = 1, # initial value for λ
