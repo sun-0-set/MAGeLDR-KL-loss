@@ -231,7 +231,7 @@ def joint_stratified_indices(ds, val_frac: float, seed: int, min_count: int = 2)
     """
     Returns train_idx, val_idx using *joint* stratification over (content, organization, language).
     Graceful fallback to (content, organization) then (content) then random if some strata are too small.
-    Assumes labels in ds.df[TARGET_COLS] are 1..K (your dataset).
+    Assumes labels in ds.df[TARGET_COLS] are 1..K.
     """
     K = 5
     y = ds.df[TARGET_COLS].to_numpy(copy=False)  # shape (N,3), values 1..K

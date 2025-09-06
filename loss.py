@@ -13,10 +13,11 @@ from math import log, pi, sqrt
 
 class MAGe_LDRLoss(nn.Module):
 
+  
   def __init__ (
     self, 
     Y: torch.Tensor, # true label columns
-    K: int, # number of classes
+    K: int, # number of levels
     distribution: str = 'mixture',
     level_offset: int = 0, 
     λ0: float = 1, # initial value for λ
@@ -29,11 +30,11 @@ class MAGe_LDRLoss(nn.Module):
       
       
       def _trunc_disc_norm_grid(K):
+        SD_φ: tuple = (0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486), # precomputed .5/φ(K)^2 for K=4..10; for K>10 approximate with .5
         _kk = torch.arange(K, device=dev).tile((K,1))
         return (
-          (_kk - _kk.T).tile(K,1,1).permute(2,1,0) *\
-          (
-            (_kk + _kk.T).tile(K,1,1).permute(2,1,0)*.5 -\
+          (_kk - _kk.T).tile(K,1,1).permute(2,1,0) * (
+            (_kk + _kk.T).tile(K,1,1).permute(2,1,0) * (SD_φ[K-4] if K<=10 else .5) -\
             _kk.tile(K,1,1)
           )
         ).exp_().sum(1).reciprocal_().T
@@ -57,23 +58,27 @@ class MAGe_LDRLoss(nn.Module):
       self._debug = debug or os.environ.get("MAGE_DEBUG", "0") == "1"
       self._eps = 1e-12
       
-      
       if distribution not in ('mixture', 'uniform'):
         raise ValueError(f"Invalid distribution type: {distribution}. Choose 'mixture' or 'uniform'.")
       self.distribution = distribution
       self.Y = (Y - level_offset).long().to(dev)
       N, self.κ = self.Y.shape
+      
+      if K < 4:
+        raise ValueError("K must be at least 4.")
       self.K = K
       self.Kκ = K**self.κ
       self.logK = log(K)
       self.κlogK = self.κ * self.logK
-      φ = _trunc_disc_norm_grid(K)
-      self.Kφ_1 = self.K * φ - 1
+      f_NK = _trunc_disc_norm_grid(K)
+      self.Kf_NK_1 = K * f_NK - 1
       self.register_buffer('ρ', torch.zeros((N, self.κ), dtype=torch.float64, device=dev))
       # per-head normalized log priors ψ_h ≡ uniform at start
-      self.register_buffer('log_ψ_h',
-                           torch.full((N, self.κ, self.K), fill_value=.0,
-                                      dtype=torch.float64, device=dev))
+      self.register_buffer(
+        'log_ψ_h',
+        torch.full((N, self.κ, self.K), fill_value=.0,
+        dtype=torch.float64, device=dev)
+      )
       self.λ0 = λ0
       self.register_buffer('λ', torch.full((N,), λ0, dtype=torch.float64, device=dev))
       self.α = α
@@ -102,7 +107,7 @@ class MAGe_LDRLoss(nn.Module):
       self._sqrt3 = sqrt(3)
       self._13rd = 1/3
 
-      _Mn, _Vn, _Sn, _Kn = self._cent_moments(φ)
+      _Mn, _Vn, _Sn, _Kn = self._cent_moments(f_NK)
       
       _Mu_raw = torch.tensor([
         1,
@@ -181,7 +186,7 @@ class MAGe_LDRLoss(nn.Module):
     Returns (B, K^κ) when flat=True, else (B, K, .., K).
     """
     B, κ, K = x.shape
-    joint = x[:, 0, :]                               # (B, K)
+    joint = x[:, 0, :] # (B, K)
     for h in range(1, κ):
       joint = (joint.unsqueeze(-1) + x[:, h, :].unsqueeze(1)).reshape(B, -1)
     if flat:
@@ -328,34 +333,34 @@ class MAGe_LDRLoss(nn.Module):
       _mode = q_h.argmax(dim=2) 
       _mean, _var, _skew, _kurt = self._cent_moments(q_h) 
       ρ = self._estimate_ρ(_mode, _mean, _var, _skew / _var.pow(1.5).clamp_min(self._eps), _kurt / _var.square().clamp_min(self._eps)) 
-      Kφ_1 = self.Kφ_1[_mode]
-      log_ψ_h_new = (ρ.unsqueeze(-1)*Kφ_1).log1p()
+      Kf_NK_1 = self.Kf_NK_1[_mode]
+      log_ψ_h_shifted = (ρ.unsqueeze(-1)*Kf_NK_1).log1p()
 
-      kl_reg = (q_h * (log_q_h - log_ψ_h_new + self.logK)).sum(dim=(1,2)) 
+      kl_reg = (q_h * (log_q_h - log_ψ_h_shifted + self.logK)).sum(dim=(1,2)) 
       min_idx = torch.where(
         _mode < K-_mode,
         torch.full_like(_mode, K-1),
         torch.zeros_like(_mode)
       ).long()  
-      min_per_head = log_ψ_h_new.gather(2, min_idx.unsqueeze(-1)).squeeze(-1) 
+      min_per_head = log_ψ_h_shifted.gather(2, min_idx.unsqueeze(-1)).squeeze(-1) 
       mixture_min  = min_per_head.sum(dim=1) - self.κlogK  
       l_bound = -mixture_min  
       λt = λ0 * (1 - kl_reg / (α * l_bound))
       λ_reg_loss = -.5*α*l_bound / λ0 * (self.λ[ids] - λ0).square()
-      joint_log_ψ = self._outer_sum(log_ψ_h_new, flat=True) 
+      joint_log_ψ_shifted = self._outer_sum(log_ψ_h_shifted, flat=True) 
       
 
     # weights update
     y_pred = self._outer_sum(y_pred, flat=False)
     y_true = y_pred[*idx_true].unsqueeze(1)
     diff_logits = y_pred.view(B, -1) - y_true + self.thresholds[ids].view(B, -1)
-    diff_logits_lam_fix = diff_logits / λt.unsqueeze(1).clamp_min(1e-12) + joint_log_ψ
-    logsumexp_weighted = diff_logits_lam_fix.logsumexp(1)
-    loss_lam_fix = λt * logsumexp_weighted + λ_reg_loss
+    diff_logits_lam_fix = diff_logits / λt.unsqueeze(1).clamp_min(1e-12) + joint_log_ψ_shifted
+    scaled_logsumexp = diff_logits_lam_fix.logsumexp(1)
+    loss_lam_fix = λt * scaled_logsumexp + λ_reg_loss
     
     if update_state:
       self.ρ[ids] = ρ
-      self.log_ψ_h[ids] = log_ψ_h_new
+      self.log_ψ_h[ids] = log_ψ_h_shifted
       self.λ[ids] = λt.clamp_min(0.0)
       
     if self.log_to_wandb and wandb.run is not None:
@@ -538,25 +543,25 @@ class MultiHeadUnivariateALDR_KL(nn.Module):
 
 
 class MultiHeadCELoss(nn.Module):
-    """
-    Average CE across κ heads.
-    - y_pred: (B, κ, K) logits
-    - Y: global targets tensor (N, κ) of int labels
-    """
-    def __init__(self, Y: torch.Tensor, K: int, label_smoothing: float = 0.0):
-      super().__init__()
-      self.register_buffer("Y", Y.to(torch.long))
-      self.K = K
-      self.κ = Y.shape[1]
-      self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
+  """
+  Average CE across κ heads.
+  - y_pred: (B, κ, K) logits
+  - Y: global targets tensor (N, κ) of int labels
+  """
+  def __init__(self, Y: torch.Tensor, K: int, label_smoothing: float = 0.0):
+    super().__init__()
+    self.register_buffer("Y", Y.to(torch.long))
+    self.K = K
+    self.κ = Y.shape[1]
+    self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
 
-    def forward(self, y_pred: torch.Tensor, ids: torch.Tensor, update_state: bool = False) -> torch.Tensor:
-      # y_pred: (B, κ, K)
-      B, κ, K = y_pred.shape
-      assert κ == self.κ and K == self.K, "shape mismatch for CE loss"
-      y = self.Y[ids]  # (B, κ)
-      # compute per-head CE and average
-      losses = []
-      for h in range(κ):
-          losses.append(self.ce(y_pred[:, h, :], y[:, h] - 1))
-      return torch.stack(losses, dim=0).mean()
+  def forward(self, y_pred: torch.Tensor, ids: torch.Tensor, update_state: bool = False) -> torch.Tensor:
+    # y_pred: (B, κ, K)
+    B, κ, K = y_pred.shape
+    assert κ == self.κ and K == self.K, "shape mismatch for CE loss"
+    y = self.Y[ids]  # (B, κ)
+    # compute per-head CE and average
+    losses = []
+    for h in range(κ):
+        losses.append(self.ce(y_pred[:, h, :], y[:, h] - 1))
+    return torch.stack(losses, dim=0).mean()
