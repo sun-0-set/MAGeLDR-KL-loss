@@ -26,6 +26,7 @@ class DRESSDataset(Dataset):
         y = row[TARGET_COLS].values.astype("int64")
         item["labels"] = torch.tensor(y) 
         item["ids"] = torch.tensor(row["row_id"]) 
+        # TODO load from existing pt
         return item
 
     def get_all_targets_tensor(self):
