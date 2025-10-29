@@ -30,14 +30,19 @@ class MAGe_LDRLoss(nn.Module):
       
       
       def _trunc_disc_norm_grid(K):
-        SD_φ: tuple = (0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486), # precomputed .5/φ(K)^2 for K=4..10; for K>10 approximate with .5
+        print(f"K: {K}")
+        SD_φ = list((0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486)) # precomputed .5/φ(K)^2 for K=4..10; for K>10 approximate with .5
+        print(type(SD_φ))
         _kk = torch.arange(K, device=dev).tile((K,1))
-        return (
+        out = (
           (_kk - _kk.T).tile(K,1,1).permute(2,1,0) * (
             (_kk + _kk.T).tile(K,1,1).permute(2,1,0) * (SD_φ[K-4] if K<=10 else .5) -\
             _kk.tile(K,1,1)
           )
         ).exp_().sum(1).reciprocal_().T
+        print(f"out: {out}")
+        print(f"out.shape: {out.shape}")
+        return out
           
           
       def _level_comb_counts(Y, κ, K):
