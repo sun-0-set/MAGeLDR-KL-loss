@@ -20,7 +20,7 @@ from sklearn.metrics import confusion_matrix, cohen_kappa_score, f1_score, fbeta
 import numpy as np
 from modeling_multitask import MultiHeadDeberta
 from data_utils import DRESSDataset, TARGET_COLS
-from loss import MAGe_LDRLoss, MultiHeadUnivariateALDR_KL, MultiHeadCELoss
+from loss import JAGeRLoss, MultiHeadUnivariateALDR_KL, MultiHeadCELoss
 
 try:
     import wandb
@@ -176,8 +176,8 @@ def evaluate(model, dl, loss_fn, device, args=None):
 
             # ---- Prior-aware decoding (read-only) to match training objective ----
             # try:
-            from loss import MAGe_LDRLoss  # local import to avoid cycles on tools
-            if getattr(args, "inference_with_prior", False) and isinstance(loss_fn, MAGe_LDRLoss):
+            from loss import JAGeRLoss  # local import to avoid cycles on tools
+            if getattr(args, "inference_with_prior", False) and isinstance(loss_fn, JAGeRLoss):
                 if loss_fn.distribution == 'uniform':
                     adj = y_pred  # adding constant per class doesn't change argmax
                 else:
@@ -467,7 +467,7 @@ def main():
     # Stateful loss (init ONCE with full Y)
     Y_all = ds.get_all_targets_tensor().to(device)
     if args.loss == "mager":
-        loss_fn = MAGe_LDRLoss(
+        loss_fn = JAGeRLoss(
             Y=Y_all, K=5,
             distribution=args.distribution,
             level_offset=1,
@@ -475,7 +475,9 @@ def main():
             λ0=args.lambda0,
             α=args.alpha,
             C=args.C,
-            log_to_wandb=bool(getattr(args, "wandb", False))
+            log_to_wandb=bool(getattr(args, "wandb", False)),
+            def_batch_size=args.batch_size,
+            steps_per_epoch=len(dl_train)  # per-rank micro-batch steps/epoch (DDP-safe)
         ).to(device)
     elif args.loss == "aldrkl":
         loss_fn = MultiHeadUnivariateALDR_KL(
@@ -565,7 +567,7 @@ def main():
         return
 
 
-    optim = torch.optim.AdamW(model.parameters(), fused=True, lr=args.lr, weight_decay=args.weight_decay)
+    optim = torch.optim.AdamW(model.parameters(), fused=(device.type == "cuda"), lr=args.lr, weight_decay=args.weight_decay)
 
     # scheduler: 10% warmup
     total_steps = math.ceil(len(dl_train) / args.grad_accum) * args.epochs
@@ -610,8 +612,13 @@ def main():
                 with amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                     out = model(input_ids=input_ids, attention_mask=attention_mask)
                 y_pred = out["logits"].to(torch.float64)  # cast up for MAGeR
-                loss = loss_fn(y_pred, ids) / args.grad_accum
-
+                # per-forward state updates in loss; pass 0-based micro-step consistent across ranks
+                micro_step = (epoch - 1) * len(dl_train) + (step - 1)
+                try:
+                    loss = loss_fn(y_pred, ids, update_state=True, global_step=micro_step) / args.grad_accum
+                except TypeError:
+                    # CE baseline signature (no global_step)
+                    loss = loss_fn(y_pred, ids) / args.grad_accum
                 if scaler is not None and scaler.is_enabled():
                     scaler.scale(loss).backward()
                 else:
@@ -828,11 +835,6 @@ def main():
 
         if is_dist(): 
             dist.barrier()
-            # Average λ across ranks only if it exists (MAGeR)
-            if hasattr(loss_fn, "λ") and isinstance(getattr(loss_fn, "λ", None), torch.Tensor):
-                with torch.no_grad():
-                    dist.all_reduce(loss_fn.λ, op=dist.ReduceOp.SUM)
-                    loss_fn.λ /= dist.get_world_size()
 
     # --- Always ensure VAL is present in metrics.json (inner CV needs this) ---
     if is_main_process() and dl_val is not None:
