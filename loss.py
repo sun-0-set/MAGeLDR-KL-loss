@@ -468,20 +468,20 @@ class JAGeRLoss(nn.Module):
       _mean, _var, _skew, _kurt = self._cent_moments(p_h) 
       ρ = self._estimate_ρ(_mode, _kurt / _var.square().clamp_min(self._eps), p_h)
       
-      # ρ gated update 
-      level_counts_B = self._level_counts(Y, H, K)  # (H,K), local batch counts
-      # old batch contribution using current stored ρ for these ids
-      cumul_ρ_B = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
-      cumul_ρ_B.scatter_add_(1, Y.T.to(self.cumul_ρ.device), self.ρ[ids].T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
-      cumul_ρ = self.cumul_ρ - cumul_ρ_B
-      mean_ρ_without_B_full = cumul_ρ / (self.level_counts - level_counts_B + 1)  # (H,K)
-      mean_ρ_without_B = mean_ρ_without_B_full.gather(1, Y.T).T  # (B,H)
-      # derive 0-based epoch/step if provided; else default to 0
-      t = (global_step // self.steps_per_epoch) if (global_step is not None) else 0
-      s_t = (global_step % self.steps_per_epoch) if (global_step is not None) else 0
-      τ = s_t * self.def_batch_size / self.N + t
-      γ = (τ + 1)**(-τ)
-      ρ = γ * mean_ρ_without_B + (1 - γ) * ρ
+      # # ρ gated update 
+      # level_counts_B = self._level_counts(Y, H, K)  # (H,K), local batch counts
+      # # old batch contribution using current stored ρ for these ids
+      # cumul_ρ_B = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
+      # cumul_ρ_B.scatter_add_(1, Y.T.to(self.cumul_ρ.device), self.ρ[ids].T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
+      # cumul_ρ = self.cumul_ρ - cumul_ρ_B
+      # mean_ρ_without_B_full = cumul_ρ / (self.level_counts - level_counts_B + 1)  # (H,K)
+      # mean_ρ_without_B = mean_ρ_without_B_full.gather(1, Y.T).T  # (B,H)
+      # # derive 0-based epoch/step if provided; else default to 0
+      # t = (global_step // self.steps_per_epoch) if (global_step is not None) else 0
+      # s_t = (global_step % self.steps_per_epoch) if (global_step is not None) else 0
+      # τ = s_t * self.def_batch_size / self.N + t
+      # γ = (τ + 1)**(-τ)
+      # ρ = γ * mean_ρ_without_B + (1 - γ) * ρ
       
       # λ update
       Kπ_1_pred_max = self.Kπ_1[_mode]
@@ -525,8 +525,8 @@ class JAGeRLoss(nn.Module):
       )
     
     y_label = y_pred.gather(2, Y.unsqueeze(-1))          # (B,H,1)
-    
-    y_pred -= y_label + ρ.square().unsqueeze(-1) * (y_pred.gather(2, _mode.unsqueeze(-1)) - y_label)
+
+    y_pred = y_pred - y_label + ρ.square().unsqueeze(-1) * (y_pred.gather(2, _mode.unsqueeze(-1)) - y_label)
     y_pred = self._outer_sum(y_pred, flat=False).view(B, -1)  # (B, K^H)
     diff_logits = y_pred + c
     diff_logits_lam_fix = diff_logits / λt.unsqueeze(1) + joint_log_υ
@@ -535,13 +535,13 @@ class JAGeRLoss(nn.Module):
     
     if update_state:
       with torch.no_grad():
-       # new batch contribution with updated ρ
-        cumul_ρ_B_new = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
-        cumul_ρ_B_new.scatter_add_(1, Y.T.to(self.cumul_ρ.device), ρ.T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
-        if dist.is_available() and dist.is_initialized():
-          dist.all_reduce(cumul_ρ_B_new, op=dist.ReduceOp.SUM)
-        # replace old contribution with new (global, identical on all ranks)
-        self.cumul_ρ = cumul_ρ + cumul_ρ_B_new
+      #  # new batch contribution with updated ρ
+      #   cumul_ρ_B_new = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
+      #   cumul_ρ_B_new.scatter_add_(1, Y.T.to(self.cumul_ρ.device), ρ.T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
+      #   if dist.is_available() and dist.is_initialized():
+      #     dist.all_reduce(cumul_ρ_B_new, op=dist.ReduceOp.SUM)
+      #   # replace old contribution with new (global, identical on all ranks)
+      #   self.cumul_ρ = cumul_ρ + cumul_ρ_B_new
         # per-sample state (local ids)
         self.ρ[ids] = ρ
         self.log_υ_h[ids] = log_S_h
