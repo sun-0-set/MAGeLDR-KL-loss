@@ -482,6 +482,9 @@ class JAGeRLoss(nn.Module):
       τ = s_t * self.def_batch_size / self.N + t
       γ = (τ + 1)**(-τ)
       ρ = γ * mean_ρ_without_B + (1 - γ) * ρ
+      print(
+        f't ={t}, s_t={s_t}, τ={τ:.6f}, γ={γ:.6f}, mean_ρ_without_B={mean_ρ_without_B}, ρ={ρ}'
+      )
       
       # λ update
       Kπ_1_pred_max = self.Kπ_1[_mode]
@@ -547,7 +550,7 @@ class JAGeRLoss(nn.Module):
           dist.all_reduce(cumul_ρ_B_new, op=dist.ReduceOp.SUM)
         # replace old contribution with new (global, identical on all ranks)
         self.cumul_ρ = cumul_ρ + cumul_ρ_B_new
-        per-sample state (local ids)
+        # per-sample state (local ids)
         self.ρ[ids] = ρ
         self.log_υ_h[ids] = log_S_h
         self.λ[ids] = λt.clamp_min(0.0)
