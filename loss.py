@@ -476,12 +476,14 @@ class JAGeRLoss(nn.Module):
       cumul_ρ = self.cumul_ρ - cumul_ρ_B
       mean_ρ_without_B_full = cumul_ρ / (self.level_counts - level_counts_B + 1)  # (H,K)
       mean_ρ_without_B = mean_ρ_without_B_full.gather(1, Y.T).T  # (B,H)
+      assert (mean_ρ_without_B <= 1e0).all(), f"Mean ρ without B has values > 1: {mean_ρ_without_B}, cumul_ρ={cumul_ρ}, level_counts={self.level_counts}, level_counts_B={level_counts_B}"
       # derive 0-based epoch/step if provided; else default to 0
       t = (global_step // self.steps_per_epoch) if (global_step is not None) else 0
       s_t = (global_step % self.steps_per_epoch) if (global_step is not None) else 0
       τ = s_t * self.def_batch_size / self.N + t
       γ = (τ + 1)**(-τ)
       ρ = γ * mean_ρ_without_B + (1 - γ) * ρ
+      assert (ρ <= 1e0).all(), f"Estimated ρ has values > 1: {ρ}, mean_ρ_without_B={mean_ρ_without_B}"
       print(
         f't ={t}, s_t={s_t}, τ={τ:.6f}, γ={γ:.6f}, mean_ρ_without_B={mean_ρ_without_B}, ρ={ρ}'
       )
