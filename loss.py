@@ -526,7 +526,7 @@ class JAGeRLoss(nn.Module):
     
     y_label = y_pred.gather(2, Y.unsqueeze(-1))          # (B,H,1)
 
-    y_pred = y_pred - y_label + ρ.square().unsqueeze(-1) * (y_pred.gather(2, _mode.unsqueeze(-1)) - y_label)
+    y_pred = y_pred - y_label# + ρ.square().unsqueeze(-1) * (y_pred.gather(2, _mode.unsqueeze(-1)) - y_label)
     y_pred = self._outer_sum(y_pred, flat=False).view(B, -1)  # (B, K^H)
     diff_logits = y_pred + c
     diff_logits_lam_fix = diff_logits / λt.unsqueeze(1) + joint_log_υ
