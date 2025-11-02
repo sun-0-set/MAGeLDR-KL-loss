@@ -107,6 +107,10 @@ class JAGeRLoss(nn.Module):
       # In DDP, pass steps_per_epoch=len(dl_train) from train.py so all ranks agree.
       self.steps_per_epoch = int(steps_per_epoch) if steps_per_epoch is not None else ceil(self.N / self.def_batch_size)
       self.level_counts = self._level_counts(self.Y, self.H, K)
+      if dist.is_available() and dist.is_initialized():
+        # make denominator global to match global accumulators
+        self.level_counts = self.level_counts.to(torch.long)
+        dist.all_reduce(self.level_counts, op=dist.ReduceOp.SUM)
       self.register_buffer(
         'cumul_ρ',
         torch.zeros_like(self.level_counts, dtype=torch.float64, device=dev)
@@ -484,9 +488,9 @@ class JAGeRLoss(nn.Module):
       γ = (τ + 1)**(-τ)
       ρ = γ * mean_ρ_without_B + (1 - γ) * ρ
       assert (ρ <= 1e0).all(), f"Estimated ρ has values > 1: {ρ}, mean_ρ_without_B={mean_ρ_without_B}"
-      print(
-        f't ={t}, s_t={s_t}, τ={τ:.6f}, γ={γ:.6f}, mean_ρ_without_B={mean_ρ_without_B}, ρ={ρ}'
-      )
+      # print(
+      #   f't ={t}, s_t={s_t}, τ={τ:.6f}, γ={γ:.6f}, mean_ρ_without_B={mean_ρ_without_B}, ρ={ρ}'
+      # )
       
       # λ update
       Kπ_1_pred_max = self.Kπ_1[_mode]
@@ -556,6 +560,16 @@ class JAGeRLoss(nn.Module):
         self.ρ[ids] = ρ
         self.log_υ_h[ids] = log_S_h
         self.λ[ids] = λt.clamp_min(0.0)
+        
+        # synchronize per-id ρ so any rank that later sees these ids subtracts the same "old" value
+        if dist.is_available() and dist.is_initialized():
+          gathered = [None for _ in range(dist.get_world_size())]
+          dist.all_gather_object(gathered, (ids.detach().cpu(), ρ.detach().cpu()))
+          for ids_g, ρ_g in gathered:
+            if ids_g is None or len(ids_g) == 0:
+              continue
+            self.ρ[ids_g.to(self.ρ.device)] = ρ_g.to(self.ρ.device, dtype=self.ρ.dtype)
+
       
     if self.log_to_wandb and wandb.run is not None:
       wandb.log({
