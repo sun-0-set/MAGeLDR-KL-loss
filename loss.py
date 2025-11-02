@@ -549,19 +549,28 @@ class JAGeRLoss(nn.Module):
     
     if update_state:
       with torch.no_grad():
-       # new batch contribution with updated ρ
+        # 1) old contrib for this batch
+        cumul_ρ_B_old = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
+        cumul_ρ_B_old.scatter_add_(1, Y.T.to(self.cumul_ρ.device), self.ρ[ids].T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
+
+        # 2) new contrib for this batch
         cumul_ρ_B_new = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
         cumul_ρ_B_new.scatter_add_(1, Y.T.to(self.cumul_ρ.device), ρ.T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
+
+        # 3) delta = new - old (this is what we actually want to apply)
+        delta = cumul_ρ_B_new - cumul_ρ_B_old
+
         if dist.is_available() and dist.is_initialized():
-          dist.all_reduce(cumul_ρ_B_new, op=dist.ReduceOp.SUM)
-        # replace old contribution with new (global, identical on all ranks)
-        self.cumul_ρ = cumul_ρ + cumul_ρ_B_new
+            # everyone contributes their delta, *then* we add once
+            dist.all_reduce(delta, op=dist.ReduceOp.SUM)
+
+        # 4) global accumulator stays consistent
+        self.cumul_ρ = self.cumul_ρ + delta
         # per-sample state (local ids)
         self.ρ[ids] = ρ
         self.log_υ_h[ids] = log_S_h
         self.λ[ids] = λt.clamp_min(0.0)
         
-        # synchronize per-id ρ so any rank that later sees these ids subtracts the same "old" value
         if dist.is_available() and dist.is_initialized():
           gathered = [None for _ in range(dist.get_world_size())]
           dist.all_gather_object(gathered, (ids.detach().cpu(), ρ.detach().cpu()))
