@@ -519,10 +519,10 @@ class JAGeRLoss(nn.Module):
       
       joint_log_υ = self._outer_sum(log_υ_h, flat=False)
       # joint_log_υ[torch.arange(B, device=y_pred.device), *Y.unbind(1)] = 0  # Set thresholds for true labels to zero
-      # joint_log_υ = joint_log_υ.view(B, -1)
+      joint_log_υ = joint_log_υ.view(B, -1)
       
     
-      thresholds = self.thresholds[ids].view(B, -1)
+      thresholds = self.thresholds[ids]
       joint_idx_label = (torch.arange(B, device=y_pred.device), *Y.unbind(1))
       joint_idx_pred_max = (torch.arange(B, device=y_pred.device), *_mode.unbind(1))
       _1hot_label = torch.zeros_like(thresholds, dtype=thresholds.dtype)
