@@ -132,7 +132,7 @@ class JAGeRLoss(nn.Module):
           .contiguous()
           .to(dev)
       )
-      self.thresholds[torch.arange(self.N, device=dev), *self.Y.unbind(1)] = 0  # Set thresholds for true labels to zero
+      # self.thresholds[torch.arange(self.N, device=dev), *self.Y.unbind(1)] = 0  # Set thresholds for true labels to zero
 
       #--- Setup for ρ estimation
 
@@ -518,31 +518,31 @@ class JAGeRLoss(nn.Module):
       log_υ_h = log_S_h
       
       joint_log_υ = self._outer_sum(log_υ_h, flat=False)
-      joint_log_υ[torch.arange(B, device=y_pred.device), *Y.unbind(1)] = 0  # Set thresholds for true labels to zero
-      joint_log_υ = joint_log_υ.view(B, -1)
+      # joint_log_υ[torch.arange(B, device=y_pred.device), *Y.unbind(1)] = 0  # Set thresholds for true labels to zero
+      # joint_log_υ = joint_log_υ.view(B, -1)
       
     
       thresholds = self.thresholds[ids].view(B, -1)
-      # joint_idx_label = (torch.arange(B, device=y_pred.device), *Y.unbind(1))
-      # joint_idx_pred_max = (torch.arange(B, device=y_pred.device), *_mode.unbind(1))
-      # _1hot_label = torch.zeros_like(thresholds, dtype=thresholds.dtype)
-      # _1hot_pred_max = torch.zeros_like(thresholds, dtype=thresholds.dtype)
-      # _1hot_label[joint_idx_label] = 1.
-      # _1hot_pred_max[joint_idx_pred_max] = 1.
-      # thresholds = thresholds.view(B, -1)
-      # _1hot_label = _1hot_label.view(B, -1)
-      # _1hot_pred_max = _1hot_pred_max.view(B, -1)
-      # c = (
-      #   thresholds - (thresholds + λt.unsqueeze(-1)*joint_log_υ).mul(_1hot_label) -
-      #   (ρ.square().mean(dim=1).unsqueeze(-1) * thresholds + 
-      #   λt.unsqueeze(-1)*self._outer_sum(ρ.square().unsqueeze(-1)*log_υ_h, flat=False).view(B, -1)).mul(_1hot_pred_max - _1hot_label)
-      # )
+      joint_idx_label = (torch.arange(B, device=y_pred.device), *Y.unbind(1))
+      joint_idx_pred_max = (torch.arange(B, device=y_pred.device), *_mode.unbind(1))
+      _1hot_label = torch.zeros_like(thresholds, dtype=thresholds.dtype)
+      _1hot_pred_max = torch.zeros_like(thresholds, dtype=thresholds.dtype)
+      _1hot_label[joint_idx_label] = 1.
+      _1hot_pred_max[joint_idx_pred_max] = 1.
+      thresholds = thresholds.view(B, -1)
+      _1hot_label = _1hot_label.view(B, -1)
+      _1hot_pred_max = _1hot_pred_max.view(B, -1)
+      c = (
+        thresholds - (thresholds + λt.unsqueeze(-1)*joint_log_υ).mul(_1hot_label) -
+        (ρ.square().mean(dim=1).unsqueeze(-1) * thresholds + 
+        λt.unsqueeze(-1)*self._outer_sum(ρ.square().unsqueeze(-1)*log_υ_h, flat=False).view(B, -1)).mul(_1hot_pred_max - _1hot_label)
+      )
     
     y_label = y_pred.gather(2, Y.unsqueeze(-1))          # (B,H,1)
 
-    y_pred = y_pred - y_label# + ρ.square().unsqueeze(-1) * (y_pred.gather(2, _mode.unsqueeze(-1)) - y_label)
+    y_pred = y_pred - y_label + ρ.square().unsqueeze(-1) * (y_pred.gather(2, _mode.unsqueeze(-1)) - y_label)
     y_pred = self._outer_sum(y_pred, flat=False).view(B, -1)  # (B, K^H)
-    diff_logits = y_pred + thresholds #c
+    diff_logits = y_pred + c #thresholds
     diff_logits_lam_fix = diff_logits / λt.unsqueeze(1) + joint_log_υ
     logsumexp = diff_logits_lam_fix.view(B, -1).logsumexp(1)
     loss_lam_fix = λt * logsumexp + λ_reg_loss
