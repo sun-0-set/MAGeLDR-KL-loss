@@ -780,25 +780,41 @@ def main():
             if args.save_model and os.path.exists(best_path):
                 ckpt = torch.load(best_path, map_location="cpu")
                 unwrap(model).load_state_dict(ckpt["model"])
+
             test_loader = DataLoader(
                 ds_test, batch_size=args.batch_size, shuffle=False,
-                num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
-                pin_memory=pin, collate_fn=collate, prefetch_factor=args.prefetch_factor,
+                num_workers=args.num_workers,
+                persistent_workers=(args.num_workers > 0),
+                pin_memory=pin,
+                collate_fn=collate,
+                prefetch_factor=args.prefetch_factor,
             )
-            test_loss, tcms, tqwks = evaluate(unwrap(model), test_loader, loss_fn, device, args)
+
+            # evaluate returns: loss, cms, qwks, maes, macro_mae
+            test_loss, tcms, tqwks, tmaes, tmacro_mae = evaluate(
+                unwrap(model), test_loader, loss_fn, device, args
+            )
+
             print(
                 f"[TEST] loss={test_loss:.4f} "
-                f"qwk={tuple(f'{x:.4f}' for x in tqwks)}"
+                f"qwk={tuple(f'{x:.4f}' for x in tqwks)} "
+                f"mae={tuple(f'{x:.4f}' for x in tmaes)} "
+                f"macroMAE={tmacro_mae:.4f}"
             )
+
             if run_wandb is not None:
                 wandb.log({
                     "test/loss": float(test_loss),
                     "test/qwk_content": float(tqwks[0]),
                     "test/qwk_organization": float(tqwks[1]),
                     "test/qwk_language": float(tqwks[2]),
+                    "test/mae_content": float(tmaes[0]),
+                    "test/mae_organization": float(tmaes[1]),
+                    "test/mae_language": float(tmaes[2]),
+                    "test/macroMAE": float(tmacro_mae),
                 }, step=global_step)
 
-            # Write a compact metrics.json
+            # write compact metrics.json
             import json
             run_args = vars(args).copy()
             metrics = {
@@ -811,11 +827,15 @@ def main():
                     "loss": test_loss,
                     "qwk": tqwks,
                     "cm": [cm.tolist() for cm in tcms],
+                    "mae": tmaes,
+                    "macroMAE": tmacro_mae,
                 },
                 "args": {
                     k: run_args[k] for k in [
-                        "loss","distribution","lambda0","alpha","C","ce_label_smoothing","seed",
-                        "model_name","max_length","batch_size","grad_accum","epochs"
+                        "loss", "distribution", "lambda0", "alpha", "C",
+                        "ce_label_smoothing", "seed",
+                        "model_name", "max_length", "batch_size",
+                        "grad_accum", "epochs"
                     ]
                 }
             }
@@ -824,10 +844,6 @@ def main():
                 json.dump(metrics, f, indent=2)
             print(f"[TEST] wrote {os.path.join(args.save_dir, 'metrics.json')}")
 
-            metrics.setdefault("extra", {})["static_stats"] = static_stats
-            with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
-                json.dump(metrics, f, indent=2)
-            print(f"[TEST] wrote {os.path.join(args.save_dir, 'metrics.json')}")
 
         if is_dist(): 
             dist.barrier()
@@ -835,19 +851,18 @@ def main():
     # --- Always ensure VAL is present in metrics.json (inner CV needs this) ---
     if is_main_process() and dl_val is not None:
         try:
-            v_loss, v_cms, v_qwks = evaluate(model.module if is_dist() else model,
-                                            dl_val, loss_fn, device, args)
-            p = os.path.join(args.save_dir, "metrics.json")
-            obj = {}
-            if os.path.exists(p):
-                with open(p) as f:
-                    obj = json.load(f)
-            obj.setdefault("args", {})
+            v_loss, v_cms, v_qwks, v_maes, v_macro_mae = evaluate(
+                model.module if is_dist() else model,
+                dl_val, loss_fn, device, args
+            )
             obj["val"] = {
                 "loss": v_loss,
                 "qwk": v_qwks,
                 "cm": [cm.tolist() for cm in v_cms],
-            }
+                "mae": v_maes,
+                "macroMAE": v_macro_mae,
+}
+
             obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", static_stats)
             with open(p, "w") as f:
                 json.dump(obj, f, indent=2)
