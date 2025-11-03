@@ -701,13 +701,6 @@ def main():
                 print("\n".join("  " + " ".join(f"{v:4d}" for v in row) for row in cm))
 
 
-
-            head_names = ["content", "organization", "language"]
-            for h, name in enumerate(head_names):
-                print(f"[{name}] confusion matrix (rows=true 1..5, cols=pred 1..5):")
-                cm = cms[h]
-                print("\n".join("  " + " ".join(f"{v:4d}" for v in row) for row in cm))
-
         # checkpoint best
         if is_main_process() and args.save_model:
             if val_loss < best_val:
