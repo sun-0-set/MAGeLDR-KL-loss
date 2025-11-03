@@ -148,6 +148,8 @@ def evaluate(model, dl, loss_fn, device, args=None):
     all_true = [[], [], []]  # per-head true labels (1..K)
     all_pred = [[], [], []]  # per-head preds (1..K)
     K = 5
+    sum_emd_by_class = torch.zeros(3, K, dtype=torch.float64)
+    count_by_class   = torch.zeros(3, K, dtype=torch.long)
 
     with torch.inference_mode():
         for batch in dl:
@@ -175,13 +177,24 @@ def evaluate(model, dl, loss_fn, device, args=None):
             # plain argmax decoding – no prior, no λ scaling
             pred_idx = y_pred.argmax(-1).cpu()  # (B,3)
 
+            # --- probabilistic EMD/W1 per-sample (uses probabilities) ---
+            probs  = torch.softmax(y_pred, dim=-1)                         # (B,3,K) on device
+            levels = torch.arange(1, K+1, device=probs.device, dtype=probs.dtype)  # 1..K
+            # absolute distances to the TRUE label (broadcast)
+            abs_dist = (levels.view(1,1,-1) - labels.to(probs).unsqueeze(-1).float()).abs()  # (B,3,K)
+            emd_batch = (probs * abs_dist).sum(dim=-1).cpu()                # (B,3) on CPU
+            # aggregate per true-class for macro over classes
+            one_hot = torch.nn.functional.one_hot(labels - 1, num_classes=K).to(dtype=torch.long)  # (B,3,K) on CPU
+            sum_emd_by_class += (emd_batch.unsqueeze(-1) * one_hot).sum(dim=0).to(torch.float64)   # (3,K)
+            count_by_class   += one_hot.sum(dim=0)
+
             # collect for CM/QWK/MAE
             for h in range(3):
                 all_true[h].extend(labels[:, h].tolist())
                 all_pred[h].extend((pred_idx[:, h] + 1).tolist())
 
-    # ---- Confusion matrices + QWK + MAE ----
-    cms, qwks, maes = [], [], []
+    # ---- Confusion matrices + QWK + EMD ----
+    cms, qwks, emds = [], [], []
     label_list = list(range(1, K + 1))
     import numpy as np
     for h in range(3):
@@ -191,20 +204,21 @@ def evaluate(model, dl, loss_fn, device, args=None):
         cms.append(confusion_matrix(y_t, y_p, labels=label_list))
         qwks.append(float(cohen_kappa_score(y_t, y_p, weights="quadratic")))
 
-        if y_t.size > 0:
-            mae_h = float(np.abs(y_t - y_p).mean())
-        else:
-            mae_h = float("nan")
-        maes.append(mae_h)
+        # per-class EMD averages (ignore empty classes via nan)
+        sums   = sum_emd_by_class[h].numpy()
+        counts = count_by_class[h].numpy()
+        with np.errstate(invalid="ignore", divide="ignore"):
+            per_class_emd = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+        emds.append(float(np.nanmean(per_class_emd)))
 
-    macro_mae = float(sum(maes) / len(maes))  # 3 heads
+    macro_emd = float(sum(emds) / len(emds))  # mean over 3 heads
 
     return (
         tot_loss / max(n, 1),
         cms,
         qwks,
-        maes,
-        macro_mae,
+        emds,
+        macro_emd,
     )
 
 
@@ -672,14 +686,14 @@ def main():
 
         # Evaluate on rank 0 only
         if is_main_process():
-            val_loss, cms, qwks, maes, macro_mae = evaluate(
+            val_loss, cms, qwks, emds, macro_emd = evaluate(
                 model.module if is_dist() else model,
                 dl_val, loss_fn, device, args
             )
             print(
                 f"[epoch {epoch}] val_loss={val_loss:.4f} "
                 f"qwk={tuple(f'{x:.4f}' for x in qwks)} "
-                f"macroMAE={macro_mae:.4f}"
+                f"macroEMD={macro_emd:.4f}"
             )
             if run_wandb is not None:
                 wandb.log({
@@ -688,10 +702,10 @@ def main():
                     "val/qwk_content": float(qwks[0]),
                     "val/qwk_organization": float(qwks[1]),
                     "val/qwk_language": float(qwks[2]),
-                    "val/mae_content": float(maes[0]),
-                    "val/mae_organization": float(maes[1]),
-                    "val/mae_language": float(maes[2]),
-                    "val/macroMAE": float(macro_mae),
+                    "val/emd_content": float(emds[0]),
+                    "val/emd_organization": float(emds[1]),
+                    "val/emd_language": float(emds[2]),
+                    "val/macroEMD": float(macro_emd),
                 }, step=global_step)
 
             head_names = ["content", "organization", "language"]
@@ -783,16 +797,16 @@ def main():
                 prefetch_factor=args.prefetch_factor,
             )
 
-            # evaluate returns: loss, cms, qwks, maes, macro_mae
-            test_loss, tcms, tqwks, tmaes, tmacro_mae = evaluate(
+            # evaluate returns: loss, cms, qwks, emds, macro_emd
+            test_loss, tcms, tqwks, temds, tmacro_emd = evaluate(
                 unwrap(model), test_loader, loss_fn, device, args
             )
 
             print(
                 f"[TEST] loss={test_loss:.4f} "
                 f"qwk={tuple(f'{x:.4f}' for x in tqwks)} "
-                f"mae={tuple(f'{x:.4f}' for x in tmaes)} "
-                f"macroMAE={tmacro_mae:.4f}"
+                f"emd={tuple(f'{x:.4f}' for x in temds)} "
+                f"macroEMD={tmacro_emd:.4f}"
             )
 
             if run_wandb is not None:
@@ -801,10 +815,10 @@ def main():
                     "test/qwk_content": float(tqwks[0]),
                     "test/qwk_organization": float(tqwks[1]),
                     "test/qwk_language": float(tqwks[2]),
-                    "test/mae_content": float(tmaes[0]),
-                    "test/mae_organization": float(tmaes[1]),
-                    "test/mae_language": float(tmaes[2]),
-                    "test/macroMAE": float(tmacro_mae),
+                    "test/emd_content": float(temds[0]),
+                    "test/emd_organization": float(temds[1]),
+                    "test/emd_language": float(temds[2]),
+                    "test/macroEMD": float(tmacro_emd),
                 }, step=global_step)
 
             # write compact metrics.json
@@ -820,8 +834,8 @@ def main():
                     "loss": test_loss,
                     "qwk": tqwks,
                     "cm": [cm.tolist() for cm in tcms],
-                    "mae": tmaes,
-                    "macroMAE": tmacro_mae,
+                    "emd": temds,
+                    "macroEMD": tmacro_emd,
                 },
                 "args": {
                     k: run_args[k] for k in [
@@ -844,16 +858,22 @@ def main():
     # --- Always ensure VAL is present in metrics.json (inner CV needs this) ---
     if is_main_process() and dl_val is not None:
         try:
-            v_loss, v_cms, v_qwks, v_maes, v_macro_mae = evaluate(
+            v_loss, v_cms, v_qwks, v_emds, v_macro_emd = evaluate(
                 model.module if is_dist() else model,
                 dl_val, loss_fn, device, args
             )
+            import json
+            p = os.path.join(args.save_dir, "metrics.json")
+            obj = {}
+            if os.path.exists(p):
+                with open(p) as f:
+                    obj = json.load(f)
             obj["val"] = {
                 "loss": v_loss,
                 "qwk": v_qwks,
                 "cm": [cm.tolist() for cm in v_cms],
-                "mae": v_maes,
-                "macroMAE": v_macro_mae,
+                "emd": v_emds,
+                "macroEMD": v_macro_emd,
 }
 
             obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", static_stats)
