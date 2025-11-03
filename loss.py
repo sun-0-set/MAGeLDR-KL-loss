@@ -464,7 +464,6 @@ class JAGeRLoss(nn.Module):
 
     with torch.no_grad():
       head_scores = y_pred.detach() / λ.view(-1,1,1).clamp_min(1e-12)
-      # log_υ_h = self.log_ψ_h[ids] 
       log_p_h = head_scores.log_softmax(dim=2)
       p_h = log_p_h.exp() 
 
@@ -514,8 +513,8 @@ class JAGeRLoss(nn.Module):
       
       # competitor assignment
       Kπ_1_label = self.Kπ_1[Y]
-      # log_υ_h = (ρ.unsqueeze(-1) * (Kπ_1_label + ρ.unsqueeze(-1) * (Kπ_1_pred_max - Kπ_1_label))).log1p()
-      log_υ_h = log_S_h
+      log_υ_h = (ρ.unsqueeze(-1) * (Kπ_1_label + ρ.unsqueeze(-1) * (Kπ_1_pred_max - Kπ_1_label))).log1p()
+      # log_υ_h = log_S_h
       
       joint_log_υ = self._outer_sum(log_υ_h, flat=False)
       # joint_log_υ[torch.arange(B, device=y_pred.device), *Y.unbind(1)] = 0  # Set thresholds for true labels to zero
