@@ -16,7 +16,7 @@ from datetime import timedelta
 from transformers import get_linear_schedule_with_warmup, AutoTokenizer, DataCollatorWithPadding
 from transformers import PreTrainedTokenizerFast
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, cohen_kappa_score, f1_score, fbeta_score
+from sklearn.metrics import confusion_matrix, cohen_kappa_score
 import numpy as np
 from modeling_multitask import MultiHeadDeberta
 from data_utils import DRESSDataset, TARGET_COLS
@@ -121,8 +121,6 @@ def parse_args():
     p.add_argument("--alpha", type=float, default=2.0, help="α (MAGe)")
     p.add_argument("--C", type=float, default=1e-1, help="margin C (MAGe)")
     p.add_argument("--ce_label_smoothing", type=float, default=0.0, help="label smoothing for CE baseline")
-    p.add_argument("--inference_with_prior", action="store_true",
-                   help="Use prior-aware MAP decoding for MAGe at eval/test (read-only)")
     p.add_argument("--log_epoch_stats", action="store_true",
                    help="Write per-epoch min/mean/max for λ (and ρ if available) to save_dir/epoch_stats.csv")
 
@@ -140,14 +138,13 @@ def parse_args():
 
     return p.parse_args()
 
+
 def evaluate(model, dl, loss_fn, device, args=None):
     model.eval()
     use_amp = (device.type == "cuda")
     amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
 
     tot_loss, n = 0.0, 0
-    correct = torch.zeros(3, dtype=torch.long)
-    total   = torch.zeros(3, dtype=torch.long)
     all_true = [[], [], []]  # per-head true labels (1..K)
     all_pred = [[], [], []]  # per-head preds (1..K)
     K = 5
@@ -163,68 +160,53 @@ def evaluate(model, dl, loss_fn, device, args=None):
             with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                 out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-            y_pred = out["logits"].to(torch.float64)              # (B, 3, 5)
-            # IMPORTANT: don't mutate MAGe state on validation
+            y_pred = out["logits"].to(torch.float64)  # (B, 3, 5)
+
+            # don't mutate MAGe state on validation
             try:
                 loss = loss_fn(y_pred, ids, update_state=False)
             except TypeError:
-                loss = loss_fn(y_pred, ids)  # CE baseline ignores the flag
+                loss = loss_fn(y_pred, ids)
 
             bsz = input_ids.size(0)
             tot_loss += loss.item() * bsz
             n += bsz
 
-            # ---- Prior-aware decoding (read-only) to match training objective ----
-            # try:
-            from loss import JAGeRLoss  # local import to avoid cycles on tools
-            if getattr(args, "inference_with_prior", False) and isinstance(loss_fn, JAGeRLoss):
-                if loss_fn.distribution == 'uniform':
-                    adj = y_pred  # adding constant per class doesn't change argmax
-                else:
-                    logpsi = loss_fn.prior_for_inference(y_pred, ids)  # (B,3,5)
-                    lam = loss_fn.λ[ids].view(-1,1,1).to(device=y_pred.device, dtype=y_pred.dtype)
-                    adj = y_pred + lam * logpsi
-                pred_idx = adj.argmax(-1).cpu()
-            else:
-                pred_idx = y_pred.argmax(-1).cpu()
+            # plain argmax decoding – no prior, no λ scaling
+            pred_idx = y_pred.argmax(-1).cpu()  # (B,3)
 
+            # collect for CM/QWK/MAE
             for h in range(3):
-                total[h]   += bsz
-                correct[h] += (pred_idx[:, h] == (labels[:, h] - 1)).sum()
                 all_true[h].extend(labels[:, h].tolist())
                 all_pred[h].extend((pred_idx[:, h] + 1).tolist())
 
-    acc = (correct.float() / total.clamp_min(1)).tolist()
-
-    # Confusion matrices, QWK, and F1 per head
-    from sklearn.metrics import confusion_matrix, cohen_kappa_score, f1_score
+    # ---- Confusion matrices + QWK + MAE ----
+    cms, qwks, maes = [], [], []
+    label_list = list(range(1, K + 1))
     import numpy as np
-
-    cms, qwks = [], []
-    f1_macro, f1_weighted = [], []
-
-    label_list = list(range(1, K+1))
-
     for h in range(3):
         y_t = np.array(all_true[h], dtype=int)
         y_p = np.array(all_pred[h], dtype=int)
+
         cms.append(confusion_matrix(y_t, y_p, labels=label_list))
         qwks.append(float(cohen_kappa_score(y_t, y_p, weights="quadratic")))
-        f1_macro.append(float(f1_score(y_t, y_p, labels=label_list, average="macro")))
-        f1_weighted.append(float(f1_score(y_t, y_p, labels=label_list, average="weighted")))
 
-    # Overall micro-F1 across all heads (single-label multiclass ⇒ equals overall accuracy)
-    y_true_all = np.concatenate([np.array(all_true[h], dtype=int) for h in range(3)]) if total.sum() > 0 else np.array([], int)
-    y_pred_all = np.concatenate([np.array(all_pred[h], dtype=int) for h in range(3)]) if total.sum() > 0 else np.array([], int)
-    overall_micro_f1 = float(f1_score(y_true_all, y_pred_all, labels=label_list, average="micro")) if y_true_all.size else 0.0
+        if y_t.size > 0:
+            mae_h = float(np.abs(y_t - y_p).mean())
+        else:
+            mae_h = float("nan")
+        maes.append(mae_h)
+
+    macro_mae = float(sum(maes) / len(maes))  # 3 heads
 
     return (
         tot_loss / max(n, 1),
-        acc,           # list[3]
-        cms,           # list[3] of (KxK) arrays
-        qwks,          # list[3]
-        {"macro": f1_macro, "weighted": f1_weighted, "micro_overall": overall_micro_f1}
+        cms,
+        qwks,
+        maes,
+        macro_mae,
     )
+
 
 
 def joint_stratified_indices(ds, val_frac: float, seed: int, min_count: int = 2):
@@ -547,18 +529,33 @@ def main():
                 pin_memory=pin, collate_fn=collate, prefetch_factor=args.prefetch_factor
             )
 
-        # Evaluate (read-only; honors --inference_with_prior)
-        val_loss, vacc, vcms, vqwks, vf1s = evaluate(model.module if is_dist() else model, dl_val, loss_fn, device, args=args)
+        # Evaluate (read-only)
+        val_loss, vcms, vqwks, vmaes, vmacro_mae = evaluate(
+            model.module if is_dist() else model,
+            dl_val, loss_fn, device, args=args
+        )
         payload = {
-            "val": {"loss": val_loss, "acc": vacc, "qwk": vqwks,
-                    "f1_macro": vf1s["macro"], "f1_weighted": vf1s["weighted"],
-                    "micro_overall": vf1s["micro_overall"]}
+            "val": {
+                "loss": val_loss,
+                "qwk": vqwks,
+                "cm": [cm.tolist() for cm in vcms],
+                "mae": vmaes,
+                "macroMAE": vmacro_mae,
+            }
         }
         if args.eval_test and test_loader is not None:
-            test_loss, tacc, tcms, tqwks, tf1s = evaluate(model.module if is_dist() else model, test_loader, loss_fn, device, args=args)
-            payload["test"] = {"loss": test_loss, "acc": tacc, "qwk": tqwks,
-                               "f1_macro": tf1s["macro"], "f1_weighted": tf1s["weighted"],
-                               "micro_overall": tf1s["micro_overall"]}
+            test_loss, tcms, tqwks, tmaes, tmacro_mae = evaluate(
+                model.module if is_dist() else model,
+                test_loader, loss_fn, device, args=args
+            )
+            payload["test"] = {
+                "loss": test_loss,
+                "qwk": tqwks,
+                "cm": [cm.tolist() for cm in tcms],
+                "mae": tmaes,
+                "macroMAE": tmacro_mae,
+            }
+
         payload.setdefault("extra", {})["static_stats"] = static_stats
         os.makedirs(args.save_dir, exist_ok=True)
         with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
@@ -675,37 +672,36 @@ def main():
 
         # Evaluate on rank 0 only
         if is_main_process():
-            val_loss, acc, cms, qwks, f1s = evaluate(model.module if is_dist() else model, dl_val, loss_fn, device, args)
+            val_loss, cms, qwks, maes, macro_mae = evaluate(
+                model.module if is_dist() else model,
+                dl_val, loss_fn, device, args
+            )
             print(
                 f"[epoch {epoch}] val_loss={val_loss:.4f} "
-                f"acc={tuple(f'{x:.4f}' for x in acc)} "
                 f"qwk={tuple(f'{x:.4f}' for x in qwks)} "
-                f"f1_macro={tuple(f'{x:.4f}' for x in f1s['macro'])} "
-                f"f1_weighted={tuple(f'{x:.4f}' for x in f1s['weighted'])} "
-                f"micro_overall={f1s['micro_overall']:.4f}"
-                )
-            
+                f"macroMAE={macro_mae:.4f}"
+            )
             if run_wandb is not None:
-                # vacc/vqwks/vf1s are tuples; ensure float cast if they’re strings
-                train_loss_avg = running / max(1, math.ceil(len(dl_train)/args.grad_accum))
-                def _as_float(x): 
-                    try: return float(x)
-                    except: return x
-                v_acc = list(map(_as_float, acc))
-                v_qwk = list(map(_as_float, qwks))
-                v_f1m = list(map(_as_float, f1s["macro"]))
-                v_f1w = list(map(_as_float, f1s["weighted"]))
-
                 wandb.log({
-                    "train/loss_epoch": float(train_loss_avg),
+                    "train/loss_epoch": float(running / max(1, math.ceil(len(dl_train)/args.grad_accum))),
                     "val/loss": float(val_loss),
-                    "val/acc_content": v_acc[0], "val/acc_organization": v_acc[1], "val/acc_language": v_acc[2],
-                    "val/qwk_content": v_qwk[0], "val/qwk_organization": v_qwk[1], "val/qwk_language": v_qwk[2],
-                    "val/f1_macro_content": v_f1m[0], "val/f1_macro_organization": v_f1m[1], "val/f1_macro_language": v_f1m[2],
-                    "val/f1_weighted_content": v_f1w[0], "val/f1_weighted_organization": v_f1w[1], "val/f1_weighted_language": v_f1w[2],
+                    "val/qwk_content": float(qwks[0]),
+                    "val/qwk_organization": float(qwks[1]),
+                    "val/qwk_language": float(qwks[2]),
+                    "val/mae_content": float(maes[0]),
+                    "val/mae_organization": float(maes[1]),
+                    "val/mae_language": float(maes[2]),
+                    "val/macroMAE": float(macro_mae),
                 }, step=global_step)
 
-            
+            head_names = ["content", "organization", "language"]
+            for h, name in enumerate(head_names):
+                print(f"[{name}] confusion matrix (rows=true 1..5, cols=pred 1..5):")
+                cm = cms[h]
+                print("\n".join("  " + " ".join(f"{v:4d}" for v in row) for row in cm))
+
+
+
             head_names = ["content", "organization", "language"]
             for h, name in enumerate(head_names):
                 print(f"[{name}] confusion matrix (rows=true 1..5, cols=pred 1..5):")
@@ -789,45 +785,45 @@ def main():
                 num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
                 pin_memory=pin, collate_fn=collate, prefetch_factor=args.prefetch_factor,
             )
-            test_loss, tacc, tcms, tqwks, tf1s = evaluate(unwrap(model), test_loader, loss_fn, device, args)
-            print(f"[TEST] loss={test_loss:.4f} acc={tuple(f'{x:.4f}' for x in tacc)} "
-                f"qwk={tuple(f'{x:.4f}' for x in tqwks)} "
-                f"f1_macro={tuple(f'{x:.4f}' for x in tf1s['macro'])} "
-                f"f1_weighted={tuple(f'{x:.4f}' for x in tf1s['weighted'])} "
-                f"micro_overall={tf1s['micro_overall']:.4f}")
-            
+            test_loss, tcms, tqwks = evaluate(unwrap(model), test_loader, loss_fn, device, args)
+            print(
+                f"[TEST] loss={test_loss:.4f} "
+                f"qwk={tuple(f'{x:.4f}' for x in tqwks)}"
+            )
             if run_wandb is not None:
-                # test metrics
-                def _as_float(x): 
-                    try: return float(x)
-                    except: return x
-                t_acc = list(map(_as_float, tacc))
-                t_qwk = list(map(_as_float, tqwks))
-                t_f1m = list(map(_as_float, tf1s["macro"]))
-                t_f1w = list(map(_as_float, tf1s["weighted"]))
-
                 wandb.log({
                     "test/loss": float(test_loss),
-                    "test/acc_content": t_acc[0], "test/acc_organization": t_acc[1], "test/acc_language": t_acc[2],
-                    "test/qwk_content": t_qwk[0], "test/qwk_organization": t_qwk[1], "test/qwk_language": t_qwk[2],
-                    "test/f1_macro_content": t_f1m[0], "test/f1_macro_organization": t_f1m[1], "test/f1_macro_language": t_f1m[2],
-                    "test/f1_weighted_content": t_f1w[0], "test/f1_weighted_organization": t_f1w[1], "test/f1_weighted_language": t_f1w[2],
+                    "test/qwk_content": float(tqwks[0]),
+                    "test/qwk_organization": float(tqwks[1]),
+                    "test/qwk_language": float(tqwks[2]),
                 }, step=global_step)
 
-            
             # Write a compact metrics.json
             import json
             run_args = vars(args).copy()
             metrics = {
-                "val": {"loss": val_loss, "acc": acc, "qwk": qwks,
-                        "f1_macro": f1s["macro"], "f1_weighted": f1s["weighted"],
-                        "micro_overall": f1s["micro_overall"]},
-                "test": {"loss": test_loss, "acc": tacc, "qwk": tqwks,
-                        "f1_macro": tf1s["macro"], "f1_weighted": tf1s["weighted"],
-                        "micro_overall": tf1s["micro_overall"]},
-                "args": {k: run_args[k] for k in ["loss","distribution","lambda0","alpha","C","ce_label_smoothing","seed",
-                                                "model_name","max_length","batch_size","grad_accum","epochs"]}
+                "val": {
+                    "loss": val_loss,
+                    "qwk": qwks,
+                    "cm": [cm.tolist() for cm in cms],
+                },
+                "test": {
+                    "loss": test_loss,
+                    "qwk": tqwks,
+                    "cm": [cm.tolist() for cm in tcms],
+                },
+                "args": {
+                    k: run_args[k] for k in [
+                        "loss","distribution","lambda0","alpha","C","ce_label_smoothing","seed",
+                        "model_name","max_length","batch_size","grad_accum","epochs"
+                    ]
+                }
             }
+            metrics.setdefault("extra", {})["static_stats"] = static_stats
+            with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
+                json.dump(metrics, f, indent=2)
+            print(f"[TEST] wrote {os.path.join(args.save_dir, 'metrics.json')}")
+
             metrics.setdefault("extra", {})["static_stats"] = static_stats
             with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
                 json.dump(metrics, f, indent=2)
@@ -839,10 +835,8 @@ def main():
     # --- Always ensure VAL is present in metrics.json (inner CV needs this) ---
     if is_main_process() and dl_val is not None:
         try:
-            # Evaluate VAL once on rank 0
-            v_loss, v_acc, v_cms, v_qwks, v_f1s = evaluate(model.module if is_dist() else model,
-                                                           dl_val, loss_fn, device, args)
-            # Load existing metrics (may already contain TEST)
+            v_loss, v_cms, v_qwks = evaluate(model.module if is_dist() else model,
+                                            dl_val, loss_fn, device, args)
             p = os.path.join(args.save_dir, "metrics.json")
             obj = {}
             if os.path.exists(p):
@@ -850,9 +844,9 @@ def main():
                     obj = json.load(f)
             obj.setdefault("args", {})
             obj["val"] = {
-                "loss": v_loss, "acc": v_acc, "qwk": v_qwks,
-                "f1_macro": v_f1s.get("macro"), "f1_weighted": v_f1s.get("weighted"),
-                "micro_overall": v_f1s.get("micro_overall")
+                "loss": v_loss,
+                "qwk": v_qwks,
+                "cm": [cm.tolist() for cm in v_cms],
             }
             obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", static_stats)
             with open(p, "w") as f:
@@ -860,6 +854,7 @@ def main():
             print(f"[VAL] updated {p}")
         except Exception as e:
             print(f"[warn] could not append VAL metrics: {e}")
+
 
 
     if is_dist(): dist.destroy_process_group()
