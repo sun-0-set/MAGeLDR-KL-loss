@@ -690,9 +690,12 @@ def main():
                 model.module if is_dist() else model,
                 dl_val, loss_fn, device, args
             )
+            # average QWK across heads
+            avg_qwk = float(sum(qwks) / len(qwks)) if len(qwks) else float("nan")
             print(
                 f"[epoch {epoch}] val_loss={val_loss:.4f} "
                 f"qwk={tuple(f'{x:.4f}' for x in qwks)} "
+                f"averageQWK={avg_qwk:.4f} "
                 f"macroEMD={macro_emd:.4f}"
             )
             if run_wandb is not None:
@@ -702,6 +705,7 @@ def main():
                     "val/qwk_content": float(qwks[0]),
                     "val/qwk_organization": float(qwks[1]),
                     "val/qwk_language": float(qwks[2]),
+                    "val/qwk_average": float(avg_qwk),
                     "val/emd_content": float(emds[0]),
                     "val/emd_organization": float(emds[1]),
                     "val/emd_language": float(emds[2]),
@@ -801,10 +805,13 @@ def main():
             test_loss, tcms, tqwks, temds, tmacro_emd = evaluate(
                 unwrap(model), test_loader, loss_fn, device, args
             )
+            # average QWK across heads (test)
+            tavg_qwk = float(sum(tqwks) / len(tqwks)) if len(tqwks) else float("nan")
 
             print(
                 f"[TEST] loss={test_loss:.4f} "
                 f"qwk={tuple(f'{x:.4f}' for x in tqwks)} "
+                f"averageQWK={tavg_qwk:.4f} "
                 f"emd={tuple(f'{x:.4f}' for x in temds)} "
                 f"macroEMD={tmacro_emd:.4f}"
             )
@@ -815,6 +822,7 @@ def main():
                     "test/qwk_content": float(tqwks[0]),
                     "test/qwk_organization": float(tqwks[1]),
                     "test/qwk_language": float(tqwks[2]),
+                    "test/qwk_average": float(tavg_qwk),
                     "test/emd_content": float(temds[0]),
                     "test/emd_organization": float(temds[1]),
                     "test/emd_language": float(temds[2]),
@@ -828,11 +836,13 @@ def main():
                 "val": {
                     "loss": val_loss,
                     "qwk": qwks,
+                    "qwk_average": avg_qwk,
                     "cm": [cm.tolist() for cm in cms],
                 },
                 "test": {
                     "loss": test_loss,
                     "qwk": tqwks,
+                    "qwk_average": tavg_qwk,
                     "cm": [cm.tolist() for cm in tcms],
                     "emd": temds,
                     "macroEMD": tmacro_emd,
@@ -868,9 +878,11 @@ def main():
             if os.path.exists(p):
                 with open(p) as f:
                     obj = json.load(f)
+            v_avg_qwk = float(sum(v_qwks) / len(v_qwks)) if len(v_qwks) else float("nan")
             obj["val"] = {
                 "loss": v_loss,
                 "qwk": v_qwks,
+                "qwk_average": v_avg_qwk,
                 "cm": [cm.tolist() for cm in v_cms],
                 "emd": v_emds,
                 "macroEMD": v_macro_emd,
