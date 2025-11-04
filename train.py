@@ -283,6 +283,35 @@ def _maybe_init_wandb(args):
     return run
 
 
+def _log_cms_as_wandb_images(cms, split: str, head_names=("content", "organization", "language"), step: int | None = None):
+    """
+    Render a list[3] of confusion matrices as small heatmaps and log to W&B.
+    Safe no-op if W&B is unavailable.
+    """
+    if wandb is None or wandb.run is None:
+        return
+    import numpy as np
+    import matplotlib.pyplot as plt
+    if not cms:
+        return
+    K = int(np.asarray(cms[0]).shape[0])
+    vmax = max(int(np.asarray(cm).max()) for cm in cms)
+    for h, name in enumerate(head_names):
+        cm = np.asarray(cms[h], dtype=np.int32)
+        fig = plt.figure(figsize=(3.2, 3.2), dpi=150)
+        ax = fig.add_subplot(111)
+        ax.imshow(cm, vmin=0, vmax=vmax, interpolation="nearest")
+        ax.set_title(f"{split.upper()} CM – {name}")
+        ax.set_xlabel("Predicted"); ax.set_ylabel("True")
+        ax.set_xticks(range(K)); ax.set_yticks(range(K))
+        ax.set_xticklabels(list(range(1, K+1))); ax.set_yticklabels(list(range(1, K+1)))
+        for i in range(K):
+            for j in range(K):
+                ax.text(j, i, int(cm[i, j]), ha="center", va="center", fontsize=8)
+        fig.tight_layout()
+        wandb.log({f"{split}/cm_{name}": wandb.Image(fig)}, step=step)
+        plt.close(fig)
+
 
 def main():
     args = parse_args()
@@ -717,6 +746,9 @@ def main():
                 print(f"[{name}] confusion matrix (rows=true 1..5, cols=pred 1..5):")
                 cm = cms[h]
                 print("\n".join("  " + " ".join(f"{v:4d}" for v in row) for row in cm))
+            # W&B heatmaps for VAL
+            if run_wandb is not None:
+                _log_cms_as_wandb_images(cms, split="val", head_names=head_names, step=global_step)
 
 
         # checkpoint best
@@ -828,6 +860,9 @@ def main():
                     "test/emd_language": float(temds[2]),
                     "test/macroEMD": float(tmacro_emd),
                 }, step=global_step)
+                # W&B heatmaps for TEST
+                _log_cms_as_wandb_images(tcms, split="test", head_names=("content","organization","language"), step=global_step)
+
 
             # write compact metrics.json
             import json
