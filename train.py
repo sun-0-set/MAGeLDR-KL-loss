@@ -1,11 +1,10 @@
 # train.py
-import math, os, random, argparse, csv
+import math, os, random, argparse, csv, json
 import contextlib
 import torch
-from torch import nn
+from torch import nn, amp
 from torch.utils.data import DataLoader, Subset
 import torch.distributed as dist
-from torch import amp
 try:
     from torch.amp import GradScaler as AmpGradScaler
 except Exception:
@@ -13,14 +12,13 @@ except Exception:
 torch.set_float32_matmul_precision("medium")
 
 from datetime import timedelta
-from transformers import get_linear_schedule_with_warmup, AutoTokenizer, DataCollatorWithPadding
-from transformers import PreTrainedTokenizerFast
+from transformers import get_linear_schedule_with_warmup, AutoTokenizer, DataCollatorWithPadding, PreTrainedTokenizerFast
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, cohen_kappa_score
 import numpy as np
 from modeling_multitask import MultiHeadDeberta
 from data_utils import DRESSDataset, TARGET_COLS
-from loss import JAGeRLoss, MultiHeadUnivariateALDR_KL, MultiHeadCELoss
+from loss import JAGeRLoss, MultiHeadCELoss
 
 try:
     import wandb
@@ -91,7 +89,7 @@ def parse_args():
     p.add_argument("--use_fast_tokenizer", type=int, default=1,
                    help="1=fast tokenizer, 0=slow (SentencePiece)")
     p.add_argument("--max_length", type=int, default=1024)
-    p.add_argument("--pad_to_multiple_of", type=int, default=32, help="dynamic padding grid")
+    p.add_argument("--pad_to_multiple_of", type=int, default=8, help="dynamic padding grid")
 
     # --- DataLoader / perf ------------------------------------------------
     p.add_argument("--num_workers", type=int, default=2)
@@ -113,13 +111,19 @@ def parse_args():
     p.add_argument("--save_model", action="store_true", help="Save best.pt (OFF by default; turn on for finalist runs).")
 
     # --- Loss family / hyperparameters --------------------------------
-    p.add_argument("--loss", choices=["mager", "aldrkl", "ce"], default="mager",
-                   help="mager = MAGe_LDRLoss (mixture/uniform), ce = cross-entropy baseline")
-    p.add_argument("--distribution", choices=["mixture", "uniform"], default="mixture",
-                   help="Only used when --loss mager")
-    p.add_argument("--lambda0", type=float, default=1.0, help="initial λ₀ (MAGe)")
-    p.add_argument("--alpha", type=float, default=2.0, help="α (MAGe)")
-    p.add_argument("--C", type=float, default=1e-1, help="margin C (MAGe)")
+    p.add_argument("--loss", choices=["jager", "ce"], default="jager",
+                   help="jager = JAGeR, ce = cross-entropy")
+    p.add_argument("--joint", type=int, default=1,
+                   help="JAGeR: 1 = use joint K^H space; 0 = per-head")
+    p.add_argument("--mixture", type=int, default=1,
+                   help="JAGeR: enable mixture prior / ρ estimation")
+    p.add_argument("--conf_gating", type=int, default=1,
+                   help="JAGeR: enable confidence-gated ρ update")
+    p.add_argument("--reassignment", type=int, default=1,
+                   help="JAGeR: enable y_pred_max reassignment term")
+    p.add_argument("--lambda0", type=float, default=1.0, help="initial λ (JAGeR)")
+    p.add_argument("--alpha", type=float, default=2.0, help="α (JAGeR)")
+    p.add_argument("--C", type=float, default=1e-1, help="margin C (JAGeR)")
     p.add_argument("--ce_label_smoothing", type=float, default=0.0, help="label smoothing for CE baseline")
     p.add_argument("--log_epoch_stats", action="store_true",
                    help="Write per-epoch min/mean/max for λ (and ρ if available) to save_dir/epoch_stats.csv")
@@ -132,7 +136,7 @@ def parse_args():
 
     # --- W&B / logging -------------------------------------------------
     p.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
-    p.add_argument("--wandb_project", type=str, default="mager", help="W&B project name")
+    p.add_argument("--wandb_project", type=str, default="jager", help="W&B project name")
     p.add_argument("--wandb_entity", type=str, default=None, help="W&B entity (team) or None")
     p.add_argument("--wandb_mode", type=str, default="online", choices=["online","offline","disabled"], help="W&B mode")
 
@@ -164,7 +168,7 @@ def evaluate(model, dl, loss_fn, device, args=None):
 
             y_pred = out["logits"].to(torch.float64)  # (B, 3, 5)
 
-            # don't mutate MAGe state on validation
+            # don't mutate JAGeR state on validation
             try:
                 loss = loss_fn(y_pred, ids, update_state=False)
             except TypeError:
@@ -196,7 +200,6 @@ def evaluate(model, dl, loss_fn, device, args=None):
     # ---- Confusion matrices + QWK + EMD ----
     cms, qwks, emds = [], [], []
     label_list = list(range(1, K + 1))
-    import numpy as np
     for h in range(3):
         y_t = np.array(all_true[h], dtype=int)
         y_p = np.array(all_pred[h], dtype=int)
@@ -276,8 +279,11 @@ def _maybe_init_wandb(args):
         project=args.wandb_project,
         entity=args.wandb_entity or None,
         mode=args.wandb_mode,
-        name=f"{args.loss}-{getattr(args,'distribution','na')}-bs{args.batch_size}-ga{args.grad_accum}",
-        tags=[args.loss, getattr(args, "distribution", "na")],
+        name=f"{args.loss}-j{args.joint}-m{args.mixture}-cg{args.conf_gating}-ra{args.reassignment}"
+             f"-bs{args.batch_size}-ga{args.grad_accum}",
+        tags=[args.loss,
+              f"joint={args.joint}", f"mixture={args.mixture}",
+              f"conf_gating={args.conf_gating}", f"reassign={args.reassignment}"],
         config=vars(args),
     )
     return run
@@ -290,7 +296,6 @@ def _log_cms_as_wandb_images(cms, split: str, head_names=("content", "organizati
     """
     if wandb is None or wandb.run is None:
         return
-    import numpy as np
     import matplotlib.pyplot as plt
     if not cms:
         return
@@ -379,7 +384,6 @@ def main():
         import json
         with open(args.split_file) as f: split = json.load(f)
         train_ids = split["train"]; val_ids = split["val"]; test_ids = split["test"]
-        from torch.utils.data import Subset
         ds_train = Subset(ds, train_ids)
         ds_val   = Subset(ds, val_ids)
         ds_test  = Subset(ds, test_ids)
@@ -387,7 +391,6 @@ def main():
         # fallback: build joint-stratified split over (content, organization, language)
         if int(args.stratify_joint) == 1:
             tr_idx, va_idx = joint_stratified_indices(ds, val_frac=args.val_frac, seed=args.seed)
-            from torch.utils.data import Subset
             ds_train = Subset(ds, tr_idx)
             ds_val   = Subset(ds, va_idx)
             train_ids = list(map(int, tr_idx))
@@ -411,7 +414,7 @@ def main():
     if hasattr(ds, "tokenizer"): ds.tokenizer = tok
 
     # Dynamic padding collator (pads each batch to the batch max)
-    collate = DataCollatorWithPadding(tokenizer=tok, pad_to_multiple_of=8 if amp else None)
+    collate = DataCollatorWithPadding(tokenizer=tok, pad_to_multiple_of=(args.pad_to_multiple_of if args.pad_to_multiple_of > 0 else None))
     # safety: ensure pad token is set (should already be via special_tokens_map)
     if tok.pad_token is None:
         # prefer BERT-like sep as pad, else fall back to adding a PAD token
@@ -431,18 +434,19 @@ def main():
 
     pin = (device.type == "cuda")
     
+    _pf = (args.prefetch_factor if args.num_workers > 0 else None)
     dl_train = DataLoader(
         ds_train, batch_size=args.batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
-        pin_memory=pin, collate_fn=collate, prefetch_factor=args.prefetch_factor,
+        pin_memory=pin, collate_fn=collate, prefetch_factor=_pf,
     )
     
     dl_val = DataLoader(
         ds_val, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
-        pin_memory=pin, collate_fn=collate, prefetch_factor=args.prefetch_factor,
+        pin_memory=pin, collate_fn=collate, prefetch_factor=_pf,
     )
     
     model = MultiHeadDeberta(
@@ -491,10 +495,13 @@ def main():
 
     # Stateful loss (init ONCE with full Y)
     Y_all = ds.get_all_targets_tensor().to(device)
-    if args.loss == "mager":
+    if args.loss == "jager":
         loss_fn = JAGeRLoss(
             Y=Y_all, K=5,
-            distribution=args.distribution,
+            joint=bool(args.joint),
+            mixture=bool(args.mixture),
+            conf_gating=bool(args.conf_gating),
+            reassignment=bool(args.reassignment),
             level_offset=1,
             softplus=True,
             λ0=args.lambda0,
@@ -503,15 +510,6 @@ def main():
             log_to_wandb=bool(getattr(args, "wandb", False)),
             def_batch_size=args.batch_size,
             steps_per_epoch=len(dl_train)  # per-rank micro-batch steps/epoch (DDP-safe)
-        ).to(device)
-    elif args.loss == "aldrkl":
-        loss_fn = MultiHeadUnivariateALDR_KL(
-            Y=Y_all, K=5,
-            level_offset=1,
-            softplus=True,
-            λ0=args.lambda0,
-            α=args.alpha,
-            C=args.C
         ).to(device)
     else:
         loss_fn = MultiHeadCELoss(Y=Y_all, K=5, label_smoothing=args.ce_label_smoothing).to(device)
@@ -529,17 +527,16 @@ def main():
     λ = getattr(loss_fn, "λ", None)
     ρ = getattr(loss_fn, "ρ", None)
     static_stats = {}
-    # MAGe uses (N,) λ; ALDR-KL typically uses (N,H) λ; CE exposes neither λ nor ρ
-    is_mager = args.loss.startswith("mager")
+    # λ and ρ stats: treat as per-head if tensor rank ≥ 2
     for view_name, idx in views.items():
         if not idx:
             continue
         prefix = f"static/{view_name}/"
         if isinstance(λ, torch.Tensor):
-            per_head = (not is_mager) and λ.dim() >= 2
+            per_head = λ.dim() >= 2
             static_stats[prefix + "lambda"] = _gather_stats_from_buffer(λ, idx, per_head=per_head)
         if isinstance(ρ, torch.Tensor):
-            per_head = (ρ.dim() >= 2)
+            per_head = ρ.dim() >= 2
             static_stats[prefix + "rho"] = _gather_stats_from_buffer(ρ, idx, per_head=per_head)
     if is_main_process() and run_wandb is not None:
         # flatten for W&B
@@ -569,11 +566,11 @@ def main():
             test_loader = DataLoader(
                 ds_test, batch_size=args.batch_size, shuffle=False,
                 num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
-                pin_memory=pin, collate_fn=collate, prefetch_factor=args.prefetch_factor
+                pin_memory=pin, collate_fn=collate, prefetch_factor=_pf
             )
 
         # Evaluate (read-only)
-        val_loss, vcms, vqwks, vmaes, vmacro_mae = evaluate(
+        val_loss, vcms, vqwks, v_emds, v_macro_emd = evaluate(
             model.module if is_dist() else model,
             dl_val, loss_fn, device, args=args
         )
@@ -582,12 +579,12 @@ def main():
                 "loss": val_loss,
                 "qwk": vqwks,
                 "cm": [cm.tolist() for cm in vcms],
-                "mae": vmaes,
-                "macroMAE": vmacro_mae,
+                "emd": v_emds,
+                "macroEMD": v_macro_emd,
             }
         }
         if args.eval_test and test_loader is not None:
-            test_loss, tcms, tqwks, tmaes, tmacro_mae = evaluate(
+            test_loss, tcms, tqwks, t_emds, t_macro_emd = evaluate(
                 model.module if is_dist() else model,
                 test_loader, loss_fn, device, args=args
             )
@@ -595,8 +592,8 @@ def main():
                 "loss": test_loss,
                 "qwk": tqwks,
                 "cm": [cm.tolist() for cm in tcms],
-                "mae": tmaes,
-                "macroMAE": tmacro_mae,
+                "emd": t_emds,
+                "macroEMD": t_macro_emd,
             }
 
         payload.setdefault("extra", {})["static_stats"] = static_stats
@@ -651,7 +648,7 @@ def main():
                 # Autocast forward (bf16 on A100)
                 with amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                     out = model(input_ids=input_ids, attention_mask=attention_mask)
-                y_pred = out["logits"].to(torch.float64)  # cast up for MAGeR
+                y_pred = out["logits"].to(torch.float64)  # cast up for JAGeR
                 # per-forward state updates in loss; pass 0-based micro-step consistent across ranks
                 micro_step = (epoch - 1) * len(dl_train) + (step - 1)
                 try:
@@ -681,7 +678,7 @@ def main():
                 if run_wandb is not None:
                     # Per-optimizer-step logging (use last computed loss)
                     log_dict = {"train/loss_step": float(loss.detach().cpu()), "epoch": epoch}
-                    # λ stats (only for MAGe loss)
+                    # λ stats (only for JAGeR loss)
                     λ = getattr(loss_fn, "λ", None)
                     if isinstance(λ, torch.Tensor):
                         lam_det = λ.detach()
@@ -763,13 +760,25 @@ def main():
                 with open(os.path.join(args.save_dir, "run_args.json"), "w") as f:
                     json.dump(vars(args), f, indent=2)
                 print(f"  ↑ saved best to {path}")
+                if run_wandb is not None:
+                   try:
+                       art = wandb.Artifact(
+                           f"best-{args.loss}-j{args.joint}-m{args.mixture}"
+                           f"-cg{args.conf_gating}-ra{args.reassignment}",
+                           type="model",
+                           metadata={"epoch": epoch}
+                       )
+                       art.add_file(os.path.join(args.save_dir, "best.pt"))
+                       wandb.log_artifact(art)
+                   except Exception as e:
+                       print("[W&B] artifact log skipped:", e)
 
             # --- append per-epoch stats (refit only; enabled by flag) ---
             if args.log_epoch_stats:
                 # union of train/val/(test if present) was built earlier
                 ids = idx_all
                 row = {"epoch": int(epoch)}
-                # λ: MAGeR → (N,), ALDR-KL → (N,H)
+                # λ: JAGeR shape depends on joint/per-head implementation
                 λ = getattr(loss_fn, "λ", None)
                 if isinstance(λ, torch.Tensor):
                     sel = λ.detach().cpu()[ids]
@@ -785,7 +794,7 @@ def main():
                             row[f"λ_min_h{h}"]  = float(mins[h].item())
                             row[f"λ_mean_h{h}"] = float(means[h].item())
                             row[f"λ_max_h{h}"]  = float(maxs[h].item())
-                # ρ for MAGeR-mixture (1 per head per sample), if present
+                # ρ for JAGeR-mixture (1 per head per sample), if present
                 ρ = getattr(loss_fn, "ρ", None)
                 if isinstance(ρ, torch.Tensor):
                     sel = ρ.detach().cpu()[ids]
@@ -802,18 +811,21 @@ def main():
                     w = csv.DictWriter(f, fieldnames=cols)
                     if is_new: w.writeheader()
                     w.writerow(row)
-                
+
+               # Log epoch_stats.csv as a separate artifact (avoid duplicating best.pt)
                 if run_wandb is not None:
                     try:
+                        stats_path = os.path.join(args.save_dir, "epoch_stats.csv")
                         art = wandb.Artifact(
-                            f"best-{args.loss}-{getattr(args,'distribution','na')}",
-                            type="model",
+                           f"epoch-stats-{args.loss}-j{args.joint}-m{args.mixture}"
+                            f"-cg{args.conf_gating}-ra{args.reassignment}",
+                            type="metrics",
                             metadata={"epoch": epoch}
                         )
-                        art.add_file(os.path.join(args.save_dir, "best.pt"))
+                        art.add_file(stats_path)
                         wandb.log_artifact(art)
                     except Exception as e:
-                        print("[W&B] artifact log skipped:", e)
+                        print("[W&B] epoch-stats artifact log skipped:", e)
 
 
         # TEST evaluation with best.pt
@@ -830,7 +842,7 @@ def main():
                 persistent_workers=(args.num_workers > 0),
                 pin_memory=pin,
                 collate_fn=collate,
-                prefetch_factor=args.prefetch_factor,
+                prefetch_factor=_pf,
             )
 
             # evaluate returns: loss, cms, qwks, emds, macro_emd
@@ -884,7 +896,8 @@ def main():
                 },
                 "args": {
                     k: run_args[k] for k in [
-                        "loss", "distribution", "lambda0", "alpha", "C",
+                        "loss", "joint", "mixture", "conf_gating", "reassignment",
+                        "lambda0", "alpha", "C",
                         "ce_label_smoothing", "seed",
                         "model_name", "max_length", "batch_size",
                         "grad_accum", "epochs"
