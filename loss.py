@@ -376,6 +376,7 @@ class JAGeRLoss(nn.Module):
         log_S_min = log_S_h.take_along_dim(min_idx.unsqueeze(-1), 2).squeeze(-1)
         kl_div = (p_h * (log_p_h - log_S_h + logK)).sum(dim=2)
         if joint:
+          kl_div = kl_div.sum(dim=1)
           log_S_min = log_S_min.sum(dim=1)
           u_bound = -(
             self._ce(p_h, log_p_h).sum(dim=1) +
@@ -437,7 +438,7 @@ class JAGeRLoss(nn.Module):
       else:
         _1hot_label = F.one_hot(Y, K)
         if reassignment:
-          _1hot_pred_max = F.one_hot(_mode, K).bool()
+          _1hot_pred_max = F.one_hot(_mode, K)
           c = (
             thresholds - (thresholds + λt.unsqueeze(-1)*log_υ_h).mul(_1hot_label) -
             (ρ.square().unsqueeze(-1) * thresholds + 
@@ -505,94 +506,6 @@ class JAGeRLoss(nn.Module):
     
     return loss_lam_fix.mean()
 
-
-# class MultiHeadUnivariateALDR_KL(nn.Module):
-#   """
-#   Univariate label distribution-aware loss with KL divergence regularization with mean across H heads.
-#   """
-#   def __init__ (
-#     self, 
-#     Y: torch.Tensor, # true label columns
-#     K: int, # number of classes
-#     level_offset: int = 0, 
-#     λ0: float = 1, # initial value for λ
-#     α: float = 2, # initial value for α
-#     C: float = 1e-1, # initial value for C
-#     softplus: bool = False, # whether to use softplus activation
-#     debug: bool = False
-#     ):
-
-#       def _level_counts(Y, H, K):
-#         counts = torch.zeros((H, K), dtype=torch.long, device=Y.device)
-#         for h in range(H):
-#           counts[h] = torch.bincount(Y[:, h], minlength=K)
-#         return counts  
-      
-#       super().__init__()
-#       self.Y = (Y - level_offset).long().to(dev)
-#       N, self.H = self.Y.shape
-#       self.K = K
-#       self.logK = log(K)
-      
-#       import os
-#       self._debug = debug or os.environ.get("MAGE_DEBUG", "0") == "1"
-      
-#       self.λ0 = λ0
-#       self.register_buffer('λ', torch.full((N,self.H), λ0, dtype=torch.float64, device=dev))
-#       self.α = α
-#       self.softplus = softplus
-      
-#       # Margins according to Cao et al. "Learning Imbalanced Datasets with Label-Distribution-Aware Margin Loss", 2019
-#       _base = (
-#         _level_counts(self.Y, self.H, K)
-#           .to(torch.float64)
-#           .pow(-.25)
-#           .mul(C)
-#       )
-#       thresholds = (
-#         _base
-#           .unsqueeze(0)
-#           .expand(N, *_base.shape)
-#           .contiguous()
-#           .to(dev)
-#       )
-#       # Set thresholds for true labels to zero
-#       mask = F.one_hot(self.Y, K).bool()  # (N, H, K)
-#       thresholds[mask] = 0
-
-#       self.register_buffer('thresholds', thresholds)
-
-#   def forward(self, y_pred, ids, update_state: bool = True):
-#     # y_pred: (B, H==n_heads, n_levels)
-#     λ0, logK, α, K = self.λ0, self.logK, self.α, self.K
-#     Y = self.Y[ids]  # (B, H)
-#     B = y_pred.shape[0]
-#     λ = self.λ[ids] # (B, H)
-
-#     # logits tensor normalised per head
-#     if self.softplus:
-#       y_pred = F.softplus(y_pred)
-#     y_pred = F.normalize(y_pred, dim=2, p=1)*K
-
-#     with torch.no_grad():
-#       head_scores = y_pred.detach() / λ.unsqueeze(-1).clamp_min(1e-12)        # (B, H, K)
-#       log_q_h = head_scores.log_softmax(dim=2)                # (B, H, K)
-#       q_h = log_q_h.exp()                                             # (B, H, K)
-#       kl_reg = (q_h * (log_q_h + logK)).sum(dim=(2))            # (B,H)
-#       λt = λ0*(1 - kl_reg / (α*logK))  # (B,H)
-
-#       λ_reg_loss = -.5*α*logK / λ0 * (λt - λ0).square()
-
-#     # weights update
-#     y_true = y_pred.gather(2, Y.unsqueeze(-1))  # (B, H, 1)
-#     diff_logits = y_pred - y_true + self.thresholds[ids]
-#     diff_logits_lam_fix = diff_logits / λt.unsqueeze(-1).clamp_min(1e-12)
-#     logsumexp_weighted = diff_logits_lam_fix.logsumexp(dim=-1)
-#     loss_lam_fix = λt * logsumexp_weighted + λ_reg_loss
-    
-#     if update_state:
-#       self.λ[ids] = λt.clamp_min(.0)
-#     return loss_lam_fix.mean()
 
 
 class MultiHeadCELoss(nn.Module):
