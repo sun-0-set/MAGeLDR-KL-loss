@@ -187,11 +187,11 @@ def evaluate(model, dl, loss_fn, device, args=None):
             # plain argmax decoding – no prior, no λ scaling
             pred_idx = y_pred.argmax(-1).cpu()  # (B,3)
 
-            # --- probabilistic EMD/W1 per-sample (uses probabilities) ---
+            # --- probabilistic EMD/W1 per-sample (normalized to [0,1]) ---
             probs  = torch.softmax(y_pred, dim=-1)                         # (B,3,K) on device
             levels = torch.arange(1, K+1, device=probs.device, dtype=probs.dtype)  # 1..K
-            # absolute distances to the TRUE label (broadcast)
-            abs_dist = (levels.view(1,1,-1) - labels.to(probs).unsqueeze(-1).float()).abs()  # (B,3,K)
+            # absolute distances to the TRUE label (broadcast), normalized by (K-1)
+            abs_dist = (levels.view(1,1,-1) - labels.to(probs).unsqueeze(-1).float()).abs() / (K - 1)  # (B,3,K)
             emd_batch = (probs * abs_dist).sum(dim=-1).cpu()                # (B,3) on CPU
             # aggregate per true-class for macro over classes
             one_hot = torch.nn.functional.one_hot(labels - 1, num_classes=K).to(dtype=torch.long)  # (B,3,K) on CPU
@@ -375,6 +375,11 @@ def _log_cms_as_wandb_images(cms, split: str, head_names=("content", "organizati
 
 def main():
     args = parse_args()
+    
+    # Force-safe flags when mixture=0
+    if args.loss == "jager" and int(args.mixture) == 0:
+        args.conf_gating = 0
+        args.reassignment = 0
 
     if os.path.sep in args.model_name or args.model_name.startswith("."):
         args.model_name = os.path.abspath(os.path.expanduser(args.model_name))
@@ -848,6 +853,29 @@ def main():
             # W&B heatmaps for VAL
             if run_wandb is not None:
                 _log_cms_as_wandb_images(cms, split="val", head_names=head_names, step=global_step)
+            # --- append per-epoch metrics CSV (one row per epoch) ---
+            try:
+                os.makedirs(args.save_dir, exist_ok=True)
+                metrics_path = os.path.join(args.save_dir, "epoch_metrics.csv")
+                row = {
+                    "epoch": int(epoch),
+                    "train_loss_avg": float(running / max(1, math.ceil(len(dl_train)/args.grad_accum))),
+                    "val_loss": float(val_loss),
+                    "qwk_c": float(qwks[0]), "qwk_o": float(qwks[1]), "qwk_l": float(qwks[2]),
+                    "qwk_avg": float(avg_qwk),
+                    "emd_c": float(emds[0]), "emd_o": float(emds[1]), "emd_l": float(emds[2]),
+                    "macroEMD": float(macro_emd),
+                    "tailR0_c": float(tail_recalls[0]), "tailR0_o": float(tail_recalls[1]), "tailR0_l": float(tail_recalls[2]),
+                    "tailR0_avg": float(tail_recall_avg),
+                }
+                is_new = not os.path.exists(metrics_path)
+                with open(metrics_path, "a", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=list(row.keys()))
+                    if is_new:
+                        w.writeheader()
+                    w.writerow(row)
+            except Exception as e:
+                print(f"[warn] failed to write epoch_metrics.csv: {e}")
 
 
         # ----- determine improvement by avg QWK (maximize), regardless of saving -----
@@ -922,15 +950,15 @@ def main():
                     if is_new: w.writeheader()
                     w.writerow(row)
 
-               # Log epoch_stats.csv as a separate artifact (avoid duplicating best.pt)
+                # Log epoch_stats.csv as a separate artifact (avoid duplicating best.pt)
                 if run_wandb is not None:
                     try:
                         stats_path = os.path.join(args.save_dir, "epoch_stats.csv")
                         art = wandb.Artifact(
-                           f"epoch-stats-{args.loss}-j{args.joint}-m{args.mixture}"
+                            f"epoch-stats-{args.loss}-j{args.joint}-m{args.mixture}"
                             f"-cg{args.conf_gating}-ra{args.reassignment}",
                             type="metrics",
-                            metadata={"epoch": epoch}
+                            metadata={"epoch": int(epoch)}
                         )
                         art.add_file(stats_path)
                         wandb.log_artifact(art)
