@@ -48,24 +48,34 @@ if [[ "$count" != "$K" ]]; then
   exit 1
 fi
 
-# ---------- build task list ----------
-TASKS=()  # each: "LOSS|||ARGS|||TAG|||FOLD"
+# ---------- build task arrays (no string packing) ----------
+TASK_LOSS=()
+TASK_ARGS=()
+TASK_TAG=()
+TASK_FOLD=()
+
 for job in "${JOBS[@]}"; do
-  read -r LOSS ARGS <<<"$job"   # ARGS may be empty
-  TAG="${LOSS}-$(echo "${ARGS:-}" | tr ' ' '-' | tr -s '-')"
+  read -r LOSS ARGS <<<"$job"        # ARGS = full remainder (may be empty)
+  if [[ -n "${ARGS:-}" ]]; then
+    TAG="${LOSS}-$(echo "$ARGS" | tr ' ' '-' | tr -s '-')"
+  else
+    TAG="${LOSS}"
+  fi
   for f in $(seq 0 $((K-1))); do
-    TASKS+=("${LOSS}|||${ARGS:-}|||${TAG}|||${f}")
+    TASK_LOSS+=("$LOSS")
+    TASK_ARGS+=("${ARGS:-}")
+    TASK_TAG+=("$TAG")
+    TASK_FOLD+=("$f")
   done
 done
 
-total=${#TASKS[@]}
+total=${#TASK_LOSS[@]}
 if (( total == 0 )); then echo "No tasks."; exit 0; fi
 
-# ---------- state ----------
+# ---------- scheduler: keep EXACTLY 8 running when >=8 remain ----------
 slots=${#GPUS[@]}
 declare -a PIDS; PIDS=()
 declare -a LOGS; LOGS=()
-declare -a SLOT_GPU; SLOT_GPU=("${GPUS[@]}")   # slot->gpu mapping
 for ((s=0; s<slots; s++)); do PIDS[$s]=0; LOGS[$s]=""; done
 
 task_i=0
@@ -73,16 +83,26 @@ fail=0
 
 launch_on_slot () {
   local s="$1"
-  IFS='|' read -r LOSS _ ARGS _ TAG _ FOLD <<<"${TASKS[$task_i]}"
+  local gpu="${GPUS[$s]}"
+
+  local LOSS="${TASK_LOSS[$task_i]}"
+  local ARGS="${TASK_ARGS[$task_i]}"
+  local TAG="${TASK_TAG[$task_i]}"
+  local FOLD="${TASK_FOLD[$task_i]}"
+  ((task_i++))
+
   local SAVE="results/${TAG}/fold${FOLD}"
   mkdir -p "$SAVE"
   LOGS[$s]="${SAVE}/train.log"
-  local gpu="${SLOT_GPU[$s]}"
+
   echo ">> [GPU $gpu] ${TAG} fold${FOLD}"
   (
     set +e
     ARGS_ARR=()
-    if [[ -n "$ARGS" ]]; then read -r -a ARGS_ARR <<<"$ARGS"; fi
+    if [[ -n "$ARGS" ]]; then
+      # split ARGS (space-separated flags) into an array safely
+      read -r -a ARGS_ARR <<<"$ARGS"
+    fi
     CUDA_VISIBLE_DEVICES="$gpu" \
       python -u train.py "${COMMON[@]}" \
         --loss "$LOSS" "${ARGS_ARR[@]}" \
@@ -90,19 +110,19 @@ launch_on_slot () {
         --save_dir "$SAVE"
     echo $? > "${SAVE}/.exit_code"
   ) > "${LOGS[$s]}" 2>&1 &
+
   PIDS[$s]=$!
-  ((task_i++))
 }
 
-# fill all slots (exactly 8) or until tasks exhausted
+# fill up to 8 (or fewer if total < 8)
 to_start=$(( total < slots ? total : slots ))
 for ((s=0; s<to_start; s++)); do launch_on_slot "$s"; done
 
-# main loop: keep EXACTLY 8 running whenever >=8 tasks remain
+# keep exactly 8 running until tasks < 8 remain
 while (( task_i < total )); do
-  # wait for *one* job to finish
+  # wait for one child to finish
   if ! wait -n; then true; fi
-  # find finished slot(s) and refill immediately
+  # find finished slots and refill immediately
   for ((s=0; s<slots && task_i<total; s++)); do
     pid=${PIDS[$s]}
     if (( pid != 0 )) && ! kill -0 "$pid" 2>/dev/null; then
@@ -110,16 +130,16 @@ while (( task_i < total )); do
       save_dir=$(dirname "${LOGS[$s]}")
       code=$(cat "${save_dir}/.exit_code" 2>/dev/null || echo 1)
       if [[ "$code" != "0" ]]; then
-        echo "!! [GPU ${SLOT_GPU[$s]}] FAILED (code $code). See ${LOGS[$s]}"
+        echo "!! [GPU ${GPUS[$s]}] FAILED (code $code). See ${LOGS[$s]}"
         fail=1
       fi
       PIDS[$s]=0
-      launch_on_slot "$s"   # immediately refill → keeps concurrency at 8
+      launch_on_slot "$s"   # refill → keep concurrency at 8
     fi
   done
 done
 
-# no more tasks; wait remaining children (≤8) to finish
+# finish remaining ≤8 jobs
 for ((s=0; s<slots; s++)); do
   pid=${PIDS[$s]}
   if (( pid != 0 )); then
@@ -127,14 +147,14 @@ for ((s=0; s<slots; s++)); do
     save_dir=$(dirname "${LOGS[$s]}")
     code=$(cat "${save_dir}/.exit_code" 2>/dev/null || echo 1)
     if [[ "$code" != "0" ]]; then
-      echo "!! [GPU ${SLOT_GPU[$s]}] FAILED (code $code). See ${LOGS[$s]}"
+      echo "!! [GPU ${GPUS[$s]}] FAILED (code $code). See ${LOGS[$s]}"
       fail=1
     fi
   fi
 done
 
 if (( fail != 0 )); then
-  echo "Some tasks failed. Inspect 'results/*/fold*/train.log' (search for 'FAILED')."
+  echo "Some tasks failed. Inspect 'results/*/fold*/train.log' for details."
   exit 1
 fi
 echo "All tasks finished OK."
