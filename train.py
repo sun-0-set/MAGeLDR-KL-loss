@@ -76,6 +76,12 @@ def parse_args():
                    help="JSON with {train,val,test} id lists; if missing, do random split")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save_dir", default="checkpoints")
+    # --- OOF ensembling over final epochs ---
+    p.add_argument("--ens_t", type=int, default=10,
+                   help="Number of final epochs to average validation probabilities over (T).")
+    p.add_argument("--ens_stride", type=int, default=1,
+                   help="Stride when selecting the last-T epochs to average (e.g., 2 averages every 2nd epoch).")
+
     p.add_argument("--val_frac", type=float, default=0.1)
     p.add_argument("--stratify_joint", type=int, default=1,
                    help="Use joint stratification over (content, organization, language) if no --split_file.")
@@ -239,7 +245,41 @@ def evaluate(model, dl, loss_fn, device, args=None):
         tail_recall_avg
     )
 
-
+@torch.no_grad()
+def predict_probs_on_loader(model, dl, device):
+    """
+    Run forward pass on 'dl' and return:
+      ids  : (N,) dataset indices
+      y    : dict head_name->(N,) int labels (1..K)
+      probs: dict head_name->(N,C) float probabilities
+    """
+    model.eval()
+    all_ids = []
+    y_lists = {"content": [], "organization": [], "language": []}
+    p_lists = {"content": [], "organization": [], "language": []}
+    for batch in dl:
+        ids = batch["ids"].detach().cpu()
+        all_ids.append(ids)
+        labels = batch["labels"]  # tensor (B,3) with values 1..K
+        for h, name in enumerate(("content", "organization", "language")):
+            y_lists[name].append(labels[:, h].detach().cpu())
+        x = {
+            k: v.to(device, non_blocking=True)
+            for k, v in batch.items()
+            if k in ("input_ids", "attention_mask", "token_type_ids") and isinstance(v, torch.Tensor)
+        }
+        out = model(**x)
+        if isinstance(out, dict) and "logits" in out:
+            logits = out["logits"]             # (B,3,C)
+        else:
+            logits = out                       # fallback
+        probs = torch.softmax(logits.float(), dim=-1).detach().cpu()  # (B,3,C)
+        for h, name in enumerate(("content", "organization", "language")):
+            p_lists[name].append(probs[:, h, :])
+    ids = torch.cat(all_ids, dim=0).numpy()
+    y = {k: torch.cat(v, dim=0).numpy() for k, v in y_lists.items()}
+    p = {k: torch.cat(v, dim=0).numpy() for k, v in p_lists.items()}
+    return ids, y, p
 
 def joint_stratified_indices(ds, val_frac: float, seed: int, min_count: int = 2):
     """
@@ -669,6 +709,9 @@ def main():
     best_qwk = float("-inf")
     improved = False
     global_step = 0
+    # Buffer of per-epoch VAL predictions for OOF ensembling
+    val_pred_epochs = []  # list of {"epoch": int, "ids": np.ndarray, "y": dict, "p": dict}
+
     for epoch in range(1, args.epochs+1):
         # Ensure different shuffles across epochs in DDP
         if is_dist() and train_sampler is not None:
@@ -765,6 +808,10 @@ def main():
                 model.module if is_dist() else model,
                 dl_val, loss_fn, device, args
             )
+            # collect VAL probs for this epoch (for post-hoc ensembling)
+            ids_e, y_e, p_e = predict_probs_on_loader(model.module if is_dist() else model, dl_val, device)
+            val_pred_epochs.append({"epoch": int(epoch), "ids": ids_e, "y": y_e, "p": p_e})
+
             # average QWK across heads
             avg_qwk = float(sum(qwks) / len(qwks)) if len(qwks) else float("nan")
             print(
@@ -989,6 +1036,50 @@ def main():
 
         if is_dist(): 
             dist.barrier()
+
+    # ---------- Last-T-epoch probability ensembling on VAL (OOF for this fold) ----------
+    if is_main_process() and len(val_pred_epochs) > 0:
+        T = max(1, int(getattr(args, "ens_t", 10)))
+        S = max(1, int(getattr(args, "ens_stride", 1)))
+        keep = [rec for rec in val_pred_epochs[-T:]][::S]
+        base_ids = keep[0]["ids"]
+        # sanity: ids must match across kept epochs (val loader is deterministic)
+        for rec in keep[1:]:
+            if not np.array_equal(base_ids, rec["ids"]):
+                raise RuntimeError("Validation ids changed across epochs; cannot ensemble. Check val shuffle.")
+        head_names = ("content", "organization", "language")
+        avg_p = {}
+        for h in head_names:
+            stack = np.stack([rec["p"][h] for rec in keep], axis=0)  # (Ekeep, N, C)
+            avg_p[h] = stack.mean(axis=0)                            # (N, C)
+        y_true = keep[0]["y"]
+        ids    = base_ids
+        # write OOF VAL CSV with expected score, argmax, and per-class probs per head
+        rows = []
+        fold_name = os.path.basename(os.path.abspath(args.save_dir))
+        for i in range(len(ids)):
+            row = {"id": int(ids[i]), "fold": fold_name}
+            for h in head_names:
+                p = avg_p[h][i]                 # (C,)
+                C = p.shape[-1]
+                classes = np.arange(1, C+1, dtype=float)
+                exp = float((p * classes).sum())
+                pred = int(1 + np.argmax(p))
+                yt = int(y_true[h][i])
+                row[f"{h}_y"]   = yt
+                row[f"{h}_exp"] = exp
+                row[f"{h}_pred"]= pred
+                # 1-based class labels (p1..pK) for readability
+                for k in range(C):
+                    row[f"{h}_p{k+1}"] = float(p[k])
+            rows.append(row)
+        os.makedirs(args.save_dir, exist_ok=True)
+        oof_path = os.path.join(args.save_dir, f"oof_val_T{T}.csv")
+        with open(oof_path, "w", newline="") as f:
+            fieldnames = list(rows[0].keys()) if rows else ["id"]
+            w = csv.DictWriter(f, fieldnames=fieldnames); w.writeheader()
+            for r in rows: w.writerow(r)
+        print(f"[oof] wrote ensembled OOF-val predictions: {oof_path}")
 
     # --- Always ensure VAL is present in metrics.json (inner CV needs this) ---
     if is_main_process() and dl_val is not None:
