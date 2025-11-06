@@ -5,7 +5,7 @@ import torch.nn as nn
 class MultiHeadDeberta(nn.Module):
     def __init__(
         self,
-        model_name: str = "tasksource/deberta-small-long-nli",
+        model_name: str,
         num_heads: int = 3,
         num_classes: int = 5,
         *,
@@ -18,12 +18,10 @@ class MultiHeadDeberta(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        # Allow alias kwargs for convenience
         if "gradient_checkpointing" in kwargs:
             enable_grad_ckpt = bool(kwargs.pop("gradient_checkpointing"))
         if "grad_ckpt" in kwargs:
             enable_grad_ckpt = bool(kwargs.pop("grad_ckpt"))
-        # Load config/model strictly from local if requested
         self.config = AutoConfig.from_pretrained(
             model_name,
             local_files_only=local_files_only,
@@ -37,17 +35,14 @@ class MultiHeadDeberta(nn.Module):
             torch_dtype=torch_dtype,
         )
         if enable_grad_ckpt:
-            # Disable KV cache (required with checkpointing)
             if hasattr(self.encoder.config, "use_cache"):
                 self.encoder.config.use_cache = False
-            # Prefer NON-REENTRANT checkpointing to avoid “backward through graph a second time”
             if hasattr(self.encoder, "gradient_checkpointing_enable"):
                 try:
                     self.encoder.gradient_checkpointing_enable(
                         gradient_checkpointing_kwargs={"use_reentrant": False}
                     )
                 except TypeError:
-                    # Older Transformers: kwarg not supported — fall back to default
                     self.encoder.gradient_checkpointing_enable()
 
 
@@ -61,8 +56,7 @@ class MultiHeadDeberta(nn.Module):
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         out = self.encoder(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
-        # CLS pooling
-        pooled = out.last_hidden_state[:, 0]              # (B, hidden)
+        pooled = out.last_hidden_state[:, 0]
         pooled = self.dropout(pooled)
-        logits = torch.stack([head(pooled) for head in self.heads], dim=1)  # (B, 3, K)
+        logits = torch.stack([head(pooled) for head in self.heads], dim=1)
         return {"logits": logits}
