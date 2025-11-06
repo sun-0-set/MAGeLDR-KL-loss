@@ -5,11 +5,11 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 try:
-    import wandb
-    WANDB_AVAILABLE = True
+  import wandb
+  WANDB_AVAILABLE = True
 except Exception:
-    wandb = None
-    WANDB_AVAILABLE = False
+  wandb = None
+  WANDB_AVAILABLE = False
     
 from math import log, sqrt, ceil
 
