@@ -618,7 +618,8 @@ def main():
     if AmpGradScaler is not None:
         scaler = AmpGradScaler(enabled=use_amp and (amp_dtype is torch.float16))
 
-    best_val = float("inf")
+    best_qwk = float("-inf")
+    improved = False
     global_step = 0
     for epoch in range(1, args.epochs+1):
         # Ensure different shuffles across epochs in DDP
@@ -748,30 +749,38 @@ def main():
                 _log_cms_as_wandb_images(cms, split="val", head_names=head_names, step=global_step)
 
 
-        # checkpoint best
-        if is_main_process() and args.save_model:
-            if val_loss < best_val:
-                best_val = val_loss
-                path = os.path.join(args.save_dir, "best.pt")
-                to_save = unwrap(model).state_dict()
-                torch.save({"model": to_save,
-                            "config": {"model_name": args.model_name, "K": 5, "heads": 3}},
-                           path)
-                with open(os.path.join(args.save_dir, "run_args.json"), "w") as f:
-                    json.dump(vars(args), f, indent=2)
-                print(f"  ↑ saved best to {path}")
-                if run_wandb is not None:
-                   try:
-                       art = wandb.Artifact(
-                           f"best-{args.loss}-j{args.joint}-m{args.mixture}"
-                           f"-cg{args.conf_gating}-ra{args.reassignment}",
-                           type="model",
-                           metadata={"epoch": epoch}
-                       )
-                       art.add_file(os.path.join(args.save_dir, "best.pt"))
-                       wandb.log_artifact(art)
-                   except Exception as e:
-                       print("[W&B] artifact log skipped:", e)
+        # ----- determine improvement by avg QWK (maximize), regardless of saving -----
+        improved = False
+        if is_main_process() and (avg_qwk > best_qwk):
+            best_qwk = avg_qwk
+            improved = True
+
+        # ----- save best.pt only if requested -----
+        if improved and is_main_process() and args.save_model:
+            path = os.path.join(args.save_dir, "best.pt")
+            to_save = unwrap(model).state_dict()
+            os.makedirs(args.save_dir, exist_ok=True)
+            torch.save({
+                "model": to_save,
+                "config": {"model_name": args.model_name, "K": 5, "heads": 3},
+                "best_avg_qwk": float(best_qwk),
+                "epoch": int(epoch),
+            }, path)
+            with open(os.path.join(args.save_dir, "run_args.json"), "w") as f:
+                json.dump(vars(args), f, indent=2)
+            print(f"  ↑ saved new best (avgQWK={best_qwk:.4f}) to {path}")
+            if run_wandb is not None:
+                try:
+                    art = wandb.Artifact(
+                        f"best-{args.loss}-j{args.joint}-m{args.mixture}"
+                        f"-cg{args.conf_gating}-ra{args.reassignment}",
+                        type="model",
+                        metadata={"epoch": int(epoch), "best_avg_qwk": float(best_qwk)},
+                    )
+                    art.add_file(os.path.join(args.save_dir, "best.pt"))
+                    wandb.log_artifact(art)
+                except Exception as e:
+                    print("[W&B] artifact log skipped:", e)
 
             # --- append per-epoch stats (refit only; enabled by flag) ---
             if args.log_epoch_stats:
@@ -828,13 +837,15 @@ def main():
                         print("[W&B] epoch-stats artifact log skipped:", e)
 
 
-        # TEST evaluation with best.pt
-        if args.eval_test and ds_test is not None and is_main_process():
+        # TEST evaluation on improve (even if we didn't save): reload best.pt iff it exists
+        if args.eval_test and improved and ds_test is not None and is_main_process():
             # reload best
             best_path = os.path.join(args.save_dir, "best.pt")
             if args.save_model and os.path.exists(best_path):
                 ckpt = torch.load(best_path, map_location="cpu")
                 unwrap(model).load_state_dict(ckpt["model"])
+            else:
+                print("[TEST] evaluating current in-memory weights (unsaved best)")
 
             test_loader = DataLoader(
                 ds_test, batch_size=args.batch_size, shuffle=False,

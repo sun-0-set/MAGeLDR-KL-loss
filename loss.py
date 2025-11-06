@@ -11,7 +11,7 @@ except Exception:
     wandb = None
     WANDB_AVAILABLE = False
     
-from math import log, pi, sqrt, ceil
+from math import log, sqrt, ceil
 
 class JAGeRLoss(nn.Module):
 
