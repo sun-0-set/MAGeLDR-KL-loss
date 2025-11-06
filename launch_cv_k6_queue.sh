@@ -1,33 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ---- constants ----
+# ---------- config ----------
 K=6
 GPUS=(0 1 2 3 4 5 6 7)
+
 SPLITS_DIR="splits/k6_promptcv"
-TSV=../data/DREsS/DREsS_New_cleaned.tsv
-MODEL=../models/deberta-v3-large
+TSV="../data/DREsS/DREsS_New_cleaned.tsv"
+MODEL="../models/deberta-v3-large"
 
 EPOCHS=35
-T=7               # last-epoch ensemble window
-BATCH=5
+T=7
+BATCH=6
 ACCUM=2
 MAXLEN=808
 
-COMMON="--tsv $TSV --model_name $MODEL --max_length $MAXLEN \
- --epochs $EPOCHS --batch_size $BATCH --grad_accum $ACCUM \
- --use_fast_tokenizer 1 --num_workers 4 --prefetch_factor 4 \
- --ens_t $T --ens_stride 1"
+COMMON=(--tsv "$TSV" --model_name "$MODEL" --max_length "$MAXLEN"
+        --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
+        --use_fast_tokenizer 1 --num_workers 4 --prefetch_factor 4
+        --ens_t "$T" --ens_stride 1)
 
-# Keep allocator friendly on H100
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_SHOW_CPP_STACKTRACES=1
 
-# ---- configs (11) ----
-declare -a JOBS=(
+JOBS=(
   "ce"
-  "jager --joint 0 --mixture 0"
-  "jager --joint 1 --mixture 0"
+  "jager --joint 0 --mixture 0 --conf_gating 0 --reassignment 0"
+  "jager --joint 1 --mixture 0 --conf_gating 0 --reassignment 0"
   "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 0"
   "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 0"
   "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 1"
@@ -38,82 +37,104 @@ declare -a JOBS=(
   "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 1"
 )
 
-# Build a task queue: each item is "gpu=-1|loss|args|tag|fold"
-tasks=()
-for i in "${!JOBS[@]}"; do
-  read -r LOSS ARGS <<<"${JOBS[$i]}"
-  TAG="${LOSS}-$(echo "$ARGS" | tr ' ' '-' | tr -s '-')"
+# --- preflight ---
+if [[ ! -d "$SPLITS_DIR" ]]; then
+  echo "ERROR: SPLITS_DIR not found: $SPLITS_DIR"; exit 1
+fi
+count=$(ls -1 "$SPLITS_DIR"/fold*.json 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$count" != "$K" ]]; then
+  echo "ERROR: expected K=$K split files in $SPLITS_DIR, found $count"
+  ls -1 "$SPLITS_DIR"/fold*.json 2>/dev/null || true
+  exit 1
+fi
+
+# ---------- build task list ----------
+TASKS=()  # each: "LOSS|||ARGS|||TAG|||FOLD"
+for job in "${JOBS[@]}"; do
+  read -r LOSS ARGS <<<"$job"   # ARGS may be empty
+  TAG="${LOSS}-$(echo "${ARGS:-}" | tr ' ' '-' | tr -s '-')"
   for f in $(seq 0 $((K-1))); do
-    tasks+=("-1|$LOSS|$ARGS|$TAG|$f")
+    TASKS+=("${LOSS}|||${ARGS:-}|||${TAG}|||${f}")
   done
 done
 
-# Track running PIDs per GPU
-declare -A PID
-declare -A LOG
+total=${#TASKS[@]}
+if (( total == 0 )); then echo "No tasks."; exit 0; fi
 
-next=0
-num_tasks=${#tasks[@]}
+# ---------- state ----------
+slots=${#GPUS[@]}
+declare -a PIDS; PIDS=()
+declare -a LOGS; LOGS=()
+declare -a SLOT_GPU; SLOT_GPU=("${GPUS[@]}")   # slot->gpu mapping
+for ((s=0; s<slots; s++)); do PIDS[$s]=0; LOGS[$s]=""; done
 
-launch_one () {
-  local gpu="$1" loss="$2" args="$3" tag="$4" fold="$5"
-  local save="results/${tag}/fold${fold}"
-  mkdir -p "$save"
-  LOG[$gpu]="${save}/train.log"
-  echo ">> [GPU $gpu] $tag fold${fold}"
-  ( set +e
-    CUDA_VISIBLE_DEVICES=$gpu \
-      python -u train.py $COMMON --loss $loss $args \
-        --split_file "${SPLITS_DIR}/fold${fold}.json" \
-        --save_dir "$save"
-    echo $? > "${save}/.exit_code"
-  ) > "${LOG[$gpu]}" 2>&1 &
-  PID[$gpu]=$!
+task_i=0
+fail=0
+
+launch_on_slot () {
+  local s="$1"
+  IFS='|' read -r LOSS _ ARGS _ TAG _ FOLD <<<"${TASKS[$task_i]}"
+  local SAVE="results/${TAG}/fold${FOLD}"
+  mkdir -p "$SAVE"
+  LOGS[$s]="${SAVE}/train.log"
+  local gpu="${SLOT_GPU[$s]}"
+  echo ">> [GPU $gpu] ${TAG} fold${FOLD}"
+  (
+    set +e
+    ARGS_ARR=()
+    if [[ -n "$ARGS" ]]; then read -r -a ARGS_ARR <<<"$ARGS"; fi
+    CUDA_VISIBLE_DEVICES="$gpu" \
+      python -u train.py "${COMMON[@]}" \
+        --loss "$LOSS" "${ARGS_ARR[@]}" \
+        --split_file "${SPLITS_DIR}/fold${FOLD}.json" \
+        --save_dir "$SAVE"
+    echo $? > "${SAVE}/.exit_code"
+  ) > "${LOGS[$s]}" 2>&1 &
+  PIDS[$s]=$!
+  ((task_i++))
 }
 
-# Live tails
-for g in "${GPUS[@]}"; do
-  touch /tmp/log.${g}.txt
-done
-{
-  for g in "${GPUS[@]}"; do
-    [ -z "${LOG[$g]:-}" ] && LOG[$g]="/tmp/log.${g}.txt"
-    stdbuf -oL -eL awk -v p="[GPU ${g}]" '{print p, $0}' < <(tail -n +1 -F "${LOG[$g]}") &
-  done
-} >/dev/stderr
+# fill all slots (exactly 8) or until tasks exhausted
+to_start=$(( total < slots ? total : slots ))
+for ((s=0; s<to_start; s++)); do launch_on_slot "$s"; done
 
-# Main scheduling loop
-alive=0
-while (( next < num_tasks )) || (( alive > 0 )); do
-  # fill free GPUs
-  for g in "${GPUS[@]}"; do
-    if [[ -z "${PID[$g]:-}" ]] || ! kill -0 "${PID[$g]}" 2>/dev/null; then
-      if (( next < num_tasks )); then
-        IFS='|' read -r _ loss args tag fold <<< "${tasks[$next]}"
-        launch_one "$g" "$loss" "$args" "$tag" "$fold"
-        ((alive++))
-        ((next++))
+# main loop: keep EXACTLY 8 running whenever >=8 tasks remain
+while (( task_i < total )); do
+  # wait for *one* job to finish
+  if ! wait -n; then true; fi
+  # find finished slot(s) and refill immediately
+  for ((s=0; s<slots && task_i<total; s++)); do
+    pid=${PIDS[$s]}
+    if (( pid != 0 )) && ! kill -0 "$pid" 2>/dev/null; then
+      # check exit
+      save_dir=$(dirname "${LOGS[$s]}")
+      code=$(cat "${save_dir}/.exit_code" 2>/dev/null || echo 1)
+      if [[ "$code" != "0" ]]; then
+        echo "!! [GPU ${SLOT_GPU[$s]}] FAILED (code $code). See ${LOGS[$s]}"
+        fail=1
       fi
+      PIDS[$s]=0
+      launch_on_slot "$s"   # immediately refill → keeps concurrency at 8
     fi
   done
-
-  # check for exits
-  for g in "${GPUS[@]}"; do
-    if [[ -n "${PID[$g]:-}" ]] && ! kill -0 "${PID[$g]}" 2>/dev/null; then
-      # job ended; verify exit code
-      # infer save dir from latest LOG[g] path:
-      save_dir=$(dirname "${LOG[$g]}")
-      code=0
-      [[ -f "${save_dir}/.exit_code" ]] && code=$(cat "${save_dir}/.exit_code")
-      if (( code != 0 )); then
-        echo "!! job on GPU $g failed with code $code. See ${LOG[$g]}"
-        exit $code
-      fi
-      unset PID[$g]
-      ((alive--))
-    fi
-  done
-  sleep 2
 done
 
-echo "All tasks finished."
+# no more tasks; wait remaining children (≤8) to finish
+for ((s=0; s<slots; s++)); do
+  pid=${PIDS[$s]}
+  if (( pid != 0 )); then
+    wait "$pid" || true
+    save_dir=$(dirname "${LOGS[$s]}")
+    code=$(cat "${save_dir}/.exit_code" 2>/dev/null || echo 1)
+    if [[ "$code" != "0" ]]; then
+      echo "!! [GPU ${SLOT_GPU[$s]}] FAILED (code $code). See ${LOGS[$s]}"
+      fail=1
+    fi
+  fi
+done
+
+if (( fail != 0 )); then
+  echo "Some tasks failed. Inspect 'results/*/fold*/train.log' (search for 'FAILED')."
+  exit 1
+fi
+echo "All tasks finished OK."
