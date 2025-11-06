@@ -10,7 +10,7 @@ MODEL=../models/deberta-v3-large
 
 EPOCHS=35
 T=7               # last-epoch ensemble window
-BATCH=6
+BATCH=5
 ACCUM=2
 MAXLEN=808
 
@@ -25,7 +25,7 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 
 # ---- configs (11) ----
 declare -a JOBS=(
-  "ce                   ''"
+  "ce"
   "jager --joint 0 --mixture 0"
   "jager --joint 1 --mixture 0"
   "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 0"
