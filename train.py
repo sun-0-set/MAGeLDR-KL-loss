@@ -14,7 +14,7 @@ torch.set_float32_matmul_precision("medium")
 from datetime import timedelta
 from transformers import get_linear_schedule_with_warmup, AutoTokenizer, DataCollatorWithPadding, PreTrainedTokenizerFast
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, cohen_kappa_score
+from sklearn.metrics import confusion_matrix, cohen_kappa_score, recall_score
 import numpy as np
 from modeling_multitask import MultiHeadDeberta
 from data_utils import DRESSDataset, TARGET_COLS
@@ -198,7 +198,7 @@ def evaluate(model, dl, loss_fn, device, args=None):
                 all_pred[h].extend((pred_idx[:, h] + 1).tolist())
 
     # ---- Confusion matrices + QWK + EMD ----
-    cms, qwks, emds = [], [], []
+    cms, qwks, emds, tail_recalls = [], [], [], []
     label_list = list(range(1, K + 1))
     for h in range(3):
         y_t = np.array(all_true[h], dtype=int)
@@ -214,7 +214,20 @@ def evaluate(model, dl, loss_fn, device, args=None):
             per_class_emd = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
         emds.append(float(np.nanmean(per_class_emd)))
 
+        # ---- Tail Recall@0 (strict exact-match), macro over minority classes ----
+        if args is not None and hasattr(args, "minority_classes") and args.minority_classes and len(args.minority_classes) == 3:
+            minority = list(args.minority_classes[h])
+        else:
+            # fallback: pick 2 least frequent classes in this split
+            counts_h = np.bincount(np.clip(y_t, 1, K), minlength=K+1)[1:]
+            minority = list(np.argsort(counts_h)[:2] + 1)  # to 1..K
+        # per-class recall (exact match); zero_division=0 handles empty support gracefully
+        per_class_rec = recall_score(y_t, y_p, labels=label_list, average=None, zero_division=0)
+        mr = [per_class_rec[c-1] for c in minority if 1 <= c <= K]
+        tail_recalls.append(float(np.mean(mr)) if len(mr) else float("nan"))
+
     macro_emd = float(sum(emds) / len(emds))  # mean over 3 heads
+    tail_recall_avg = float(sum(tail_recalls) / len(tail_recalls)) if len(tail_recalls) else float("nan")
 
     return (
         tot_loss / max(n, 1),
@@ -222,6 +235,8 @@ def evaluate(model, dl, loss_fn, device, args=None):
         qwks,
         emds,
         macro_emd,
+        tail_recalls,
+        tail_recall_avg
     )
 
 
@@ -448,6 +463,31 @@ def main():
         num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
         pin_memory=pin, collate_fn=collate, prefetch_factor=_pf,
     )
+
+    # ---- Determine minority classes from TRAIN distribution (per head) ----
+    def _compute_minority_classes(dl, K=5, threshold=0.10, bottom_m=2):
+        counts = np.zeros((3, K), dtype=np.int64)
+        total = np.zeros(3, dtype=np.int64)
+        for batch in dl:
+            lab = batch["labels"].cpu().numpy()  # (B,3), values 1..K
+            for h in range(3):
+                vh = lab[:, h]
+                total[h] += vh.size
+                binc = np.bincount(np.clip(vh, 1, K), minlength=K+1)[1:]
+                counts[h] += binc
+        minority = []
+        for h in range(3):
+            prev = counts[h] / max(total[h], 1)
+            idx = [c+1 for c in range(K) if prev[c] < threshold]
+            if not idx:
+                idx = list(np.argsort(prev)[:bottom_m] + 1)
+            minority.append(idx)
+        return minority
+
+    minority_classes = _compute_minority_classes(dl_train, K=5)
+    setattr(args, "minority_classes", minority_classes)
+    if is_main_process():
+        print(f"[info] minority classes per head (from TRAIN): {minority_classes}")
     
     model = MultiHeadDeberta(
         args.model_name,
@@ -570,30 +610,38 @@ def main():
             )
 
         # Evaluate (read-only)
-        val_loss, vcms, vqwks, v_emds, v_macro_emd = evaluate(
+        val_loss, vcms, vqwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
             model.module if is_dist() else model,
             dl_val, loss_fn, device, args=args
         )
+        v_avg_qwk = float(sum(vqwks)/len(vqwks)) if len(vqwks) else float("nan")
         payload = {
             "val": {
                 "loss": val_loss,
                 "qwk": vqwks,
+                "qwk_average": v_avg_qwk,
                 "cm": [cm.tolist() for cm in vcms],
                 "emd": v_emds,
                 "macroEMD": v_macro_emd,
+                "tail_recall0": v_tails,
+                "tail_recall0_average": v_tails_avg,
             }
         }
         if args.eval_test and test_loader is not None:
-            test_loss, tcms, tqwks, t_emds, t_macro_emd = evaluate(
+            test_loss, tcms, tqwks, t_emds, t_macro_emd, t_tails, t_tails_avg = evaluate(
                 model.module if is_dist() else model,
                 test_loader, loss_fn, device, args=args
             )
+            t_avg_qwk = float(sum(tqwks)/len(tqwks)) if len(tqwks) else float("nan")
             payload["test"] = {
                 "loss": test_loss,
                 "qwk": tqwks,
+                "qwk_average": t_avg_qwk,
                 "cm": [cm.tolist() for cm in tcms],
                 "emd": t_emds,
                 "macroEMD": t_macro_emd,
+                "tail_recall0": t_tails,
+                "tail_recall0_average": t_tails_avg,
             }
 
         payload.setdefault("extra", {})["static_stats"] = static_stats
@@ -713,7 +761,7 @@ def main():
 
         # Evaluate on rank 0 only
         if is_main_process():
-            val_loss, cms, qwks, emds, macro_emd = evaluate(
+            val_loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg = evaluate(
                 model.module if is_dist() else model,
                 dl_val, loss_fn, device, args
             )
@@ -723,7 +771,9 @@ def main():
                 f"[epoch {epoch}] val_loss={val_loss:.4f} "
                 f"qwk={tuple(f'{x:.4f}' for x in qwks)} "
                 f"averageQWK={avg_qwk:.4f} "
-                f"macroEMD={macro_emd:.4f}"
+                f"macroEMD={macro_emd:.4f} "
+                f"tailR0={tuple(f'{x:.4f}' for x in tail_recalls)} "
+                f"tailR0avg={tail_recall_avg:.4f}"
             )
             if run_wandb is not None:
                 wandb.log({
@@ -737,6 +787,10 @@ def main():
                     "val/emd_organization": float(emds[1]),
                     "val/emd_language": float(emds[2]),
                     "val/macroEMD": float(macro_emd),
+                    "val/tail_recall0_content": float(tail_recalls[0]),
+                    "val/tail_recall0_organization": float(tail_recalls[1]),
+                    "val/tail_recall0_language": float(tail_recalls[2]),
+                    "val/tail_recall0_average": float(tail_recall_avg),
                 }, step=global_step)
 
             head_names = ["content", "organization", "language"]
@@ -856,8 +910,8 @@ def main():
                 prefetch_factor=_pf,
             )
 
-            # evaluate returns: loss, cms, qwks, emds, macro_emd
-            test_loss, tcms, tqwks, temds, tmacro_emd = evaluate(
+            # evaluate returns: loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg
+            test_loss, tcms, tqwks, temds, tmacro_emd, ttails, ttails_avg = evaluate(
                 unwrap(model), test_loader, loss_fn, device, args
             )
             # average QWK across heads (test)
@@ -868,7 +922,9 @@ def main():
                 f"qwk={tuple(f'{x:.4f}' for x in tqwks)} "
                 f"averageQWK={tavg_qwk:.4f} "
                 f"emd={tuple(f'{x:.4f}' for x in temds)} "
-                f"macroEMD={tmacro_emd:.4f}"
+                f"macroEMD={tmacro_emd:.4f} "
+                f"tailR0={tuple(f'{x:.4f}' for x in ttails)} "
+                f"tailR0avg={ttails_avg:.4f}"
             )
 
             if run_wandb is not None:
@@ -882,6 +938,10 @@ def main():
                     "test/emd_organization": float(temds[1]),
                     "test/emd_language": float(temds[2]),
                     "test/macroEMD": float(tmacro_emd),
+                    "test/tail_recall0_content": float(ttails[0]),
+                    "test/tail_recall0_organization": float(ttails[1]),
+                    "test/tail_recall0_language": float(ttails[2]),
+                    "test/tail_recall0_average": float(ttails_avg)
                 }, step=global_step)
                 # W&B heatmaps for TEST
                 _log_cms_as_wandb_images(tcms, split="test", head_names=("content","organization","language"), step=global_step)
@@ -896,6 +956,10 @@ def main():
                     "qwk": qwks,
                     "qwk_average": avg_qwk,
                     "cm": [cm.tolist() for cm in cms],
+                    "emd": emds,
+                    "macroEMD": macro_emd,
+                    "tail_recall0": tail_recalls,
+                    "tail_recall0_average": tail_recall_avg,
                 },
                 "test": {
                     "loss": test_loss,
@@ -904,6 +968,8 @@ def main():
                     "cm": [cm.tolist() for cm in tcms],
                     "emd": temds,
                     "macroEMD": tmacro_emd,
+                    "tail_recall0": ttails,
+                    "tail_recall0_average": ttails_avg,
                 },
                 "args": {
                     k: run_args[k] for k in [
@@ -927,7 +993,7 @@ def main():
     # --- Always ensure VAL is present in metrics.json (inner CV needs this) ---
     if is_main_process() and dl_val is not None:
         try:
-            v_loss, v_cms, v_qwks, v_emds, v_macro_emd = evaluate(
+            v_loss, v_cms, v_qwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
                 model.module if is_dist() else model,
                 dl_val, loss_fn, device, args
             )
@@ -945,6 +1011,8 @@ def main():
                 "cm": [cm.tolist() for cm in v_cms],
                 "emd": v_emds,
                 "macroEMD": v_macro_emd,
+                "tail_recall0": v_tails,
+                "tail_recall0_average": v_tails_avg,
 }
 
             obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", static_stats)
