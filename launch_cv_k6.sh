@@ -8,7 +8,7 @@ echo "[info] PWD=$PWD"
 
 # ── config ──
 K=6
-GPUS=(0 1 2 3 4 5 6 7)
+GPUS=(0 1 2 3 4 5)
 
 # Point this at whichever split scheme you want
 SPLITS_DIR="$SCRIPT_DIR/splits/k6_scorecv"
@@ -18,14 +18,14 @@ MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
 EPOCHS=35
 T=7
-BATCH=6
+BATCH=38
 ACCUM=2
 MAXLEN=808
 
 COMMON=(--tsv "$TSV" --model_name "$MODEL" --max_length "$MAXLEN"
         --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
         --use_fast_tokenizer 1 --num_workers 4 --prefetch_factor 4
-        --ens_t "$T" --ens_stride 1 --log_epoch_stats 1)
+        --ens_t "$T" --ens_stride 1 --log_epoch_stats)
 
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_SHOW_CPP_STACKTRACES=1

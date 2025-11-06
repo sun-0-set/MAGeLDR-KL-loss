@@ -1,0 +1,1441 @@
+[tok] class=PreTrainedTokenizerFast fast=True src=tokenizer.json
+[info] minority classes per head (from TRAIN): [[1, 5], [1, 5], [1, 5]]
+>> Grad checkpointing: False
+[epoch 1] step 2/44: loss=0.9613 
+[epoch 1] step 4/44: loss=0.9638 
+[epoch 1] step 6/44: loss=0.9482 
+[epoch 1] step 8/44: loss=0.9524 
+[epoch 1] step 10/44: loss=0.9474 
+[epoch 1] step 12/44: loss=0.9485 
+[epoch 1] step 14/44: loss=0.9468 
+[epoch 1] step 16/44: loss=0.9422 
+[epoch 1] step 18/44: loss=0.9371 
+[epoch 1] step 20/44: loss=0.9357 
+[epoch 1] step 22/44: loss=0.9348 
+[epoch 1] step 24/44: loss=0.9328 
+[epoch 1] step 26/44: loss=0.9318 
+[epoch 1] step 28/44: loss=0.9305 
+[epoch 1] step 30/44: loss=0.9289 
+[epoch 1] step 32/44: loss=0.9266 
+[epoch 1] step 34/44: loss=0.9243 
+[epoch 1] step 36/44: loss=0.9198 
+[epoch 1] step 38/44: loss=0.9130 
+[epoch 1] step 40/44: loss=0.9067 
+[epoch 1] step 42/44: loss=0.9009 
+[epoch 1] step 44/44: loss=0.8962 
+[epoch 1] val_loss=1.4859 qwk=('0.0864', '0.0977', '0.1215') averageQWK=0.1019 macroEMD=0.3724 tailR0=('0.0000', '0.0000', '0.0000') tailR0avg=0.0000
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    0    0   10    0
+     0   18    0   37    0
+     0   47    1   77    0
+     0   26    2   88    0
+     0    2    0   21    0
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    0    6    3    0
+    15    0   18   20    0
+    40    0   31   51    0
+    31    0   25   77    0
+     1    0    1   10    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    0    4    0    0
+     0   17   52    0    0
+     0   19  129    1    3
+     0   11   83    6    2
+     0    1    1    0    0
+[epoch 2] step 2/44: loss=0.7276 
+[epoch 2] step 4/44: loss=0.7126 
+[epoch 2] step 6/44: loss=0.7146 
+[epoch 2] step 8/44: loss=0.7054 
+[epoch 2] step 10/44: loss=0.6971 
+[epoch 2] step 12/44: loss=0.6926 
+[epoch 2] step 14/44: loss=0.6882 
+[epoch 2] step 16/44: loss=0.6871 
+[epoch 2] step 18/44: loss=0.6842 
+[epoch 2] step 20/44: loss=0.6771 
+[epoch 2] step 22/44: loss=0.6702 
+[epoch 2] step 24/44: loss=0.6640 
+[epoch 2] step 26/44: loss=0.6615 
+[epoch 2] step 28/44: loss=0.6630 
+[epoch 2] step 30/44: loss=0.6594 
+[epoch 2] step 32/44: loss=0.6571 
+[epoch 2] step 34/44: loss=0.6536 
+[epoch 2] step 36/44: loss=0.6508 
+[epoch 2] step 38/44: loss=0.6522 
+[epoch 2] step 40/44: loss=0.6478 
+[epoch 2] step 42/44: loss=0.6446 
+[epoch 2] step 44/44: loss=0.6437 
+[epoch 2] val_loss=1.1807 qwk=('0.2215', '0.1811', '0.3850') averageQWK=0.2625 macroEMD=0.3126 tailR0=('0.0000', '0.0000', '0.0000') tailR0avg=0.0000
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    0    6    4    0
+     0    0   26   29    0
+     0    0   19  106    0
+     0    0    5  111    0
+     0    0    0   23    0
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    0    4    5    0
+     0    0   22   31    0
+     0    0    7  115    0
+     0    0    2  131    0
+     0    0    0   12    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    0    4    0    0
+     0    0   57   12    0
+     0    0   88   64    0
+     0    0   16   86    0
+     0    0    0    2    0
+[epoch 3] step 2/44: loss=0.5963 
+[epoch 3] step 4/44: loss=0.5829 
+[epoch 3] step 6/44: loss=0.5640 
+[epoch 3] step 8/44: loss=0.5648 
+[epoch 3] step 10/44: loss=0.5760 
+[epoch 3] step 12/44: loss=0.5748 
+[epoch 3] step 14/44: loss=0.5694 
+[epoch 3] step 16/44: loss=0.5710 
+[epoch 3] step 18/44: loss=0.5704 
+[epoch 3] step 20/44: loss=0.5665 
+[epoch 3] step 22/44: loss=0.5590 
+[epoch 3] step 24/44: loss=0.5519 
+[epoch 3] step 26/44: loss=0.5558 
+[epoch 3] step 28/44: loss=0.5541 
+[epoch 3] step 30/44: loss=0.5527 
+[epoch 3] step 32/44: loss=0.5530 
+[epoch 3] step 34/44: loss=0.5504 
+[epoch 3] step 36/44: loss=0.5457 
+[epoch 3] step 38/44: loss=0.5463 
+[epoch 3] step 40/44: loss=0.5459 
+[epoch 3] step 42/44: loss=0.5443 
+[epoch 3] step 44/44: loss=0.5422 
+[epoch 3] val_loss=1.0445 qwk=('0.4342', '0.3920', '0.3520') averageQWK=0.3928 macroEMD=0.2622 tailR0=('0.0000', '0.0000', '0.0000') tailR0avg=0.0000
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    4    6    0    0
+     0    3   50    2    0
+     0    0  112   13    0
+     0    0   53   63    0
+     0    0    9   14    0
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    0    8    1    0
+     0    0   52    1    0
+     0    0  109   13    0
+     0    0   61   72    0
+     0    0    3    9    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    1    3    0    0
+     0    7   62    0    0
+     0    2  140   10    0
+     0    0   69   33    0
+     0    0    0    2    0
+[epoch 4] step 2/44: loss=0.5446 
+[epoch 4] step 4/44: loss=0.5234 
+[epoch 4] step 6/44: loss=0.5104 
+[epoch 4] step 8/44: loss=0.5322 
+[epoch 4] step 10/44: loss=0.5217 
+[epoch 4] step 12/44: loss=0.5160 
+[epoch 4] step 14/44: loss=0.5190 
+[epoch 4] step 16/44: loss=0.5161 
+[epoch 4] step 18/44: loss=0.5116 
+[epoch 4] step 20/44: loss=0.5109 
+[epoch 4] step 22/44: loss=0.5108 
+[epoch 4] step 24/44: loss=0.5097 
+[epoch 4] step 26/44: loss=0.5060 
+[epoch 4] step 28/44: loss=0.5028 
+[epoch 4] step 30/44: loss=0.5044 
+[epoch 4] step 32/44: loss=0.5086 
+[epoch 4] step 34/44: loss=0.5074 
+[epoch 4] step 36/44: loss=0.5055 
+[epoch 4] step 38/44: loss=0.5038 
+[epoch 4] step 40/44: loss=0.5049 
+[epoch 4] step 42/44: loss=0.5036 
+[epoch 4] step 44/44: loss=0.5013 
+[epoch 4] val_loss=0.9903 qwk=('0.6107', '0.4937', '0.5225') averageQWK=0.5423 macroEMD=0.2381 tailR0=('0.0000', '0.0000', '0.0000') tailR0avg=0.0000
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    7    3    0    0
+     0   18   31    6    0
+     0    5   76   44    0
+     0    0   18   98    0
+     0    0    1   22    0
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    1    7    1    0
+     0    6   40    7    0
+     0    2   63   57    0
+     0    0   14  119    0
+     0    0    0   12    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    1    3    0    0
+     0   11   51    7    0
+     0    6   94   52    0
+     0    0   11   91    0
+     0    0    0    2    0
+[epoch 5] step 2/44: loss=0.4359 
+[epoch 5] step 4/44: loss=0.4442 
+[epoch 5] step 6/44: loss=0.4659 
+[epoch 5] step 8/44: loss=0.4633 
+[epoch 5] step 10/44: loss=0.4567 
+[epoch 5] step 12/44: loss=0.4523 
+[epoch 5] step 14/44: loss=0.4525 
+[epoch 5] step 16/44: loss=0.4506 
+[epoch 5] step 18/44: loss=0.4580 
+[epoch 5] step 20/44: loss=0.4573 
+[epoch 5] step 22/44: loss=0.4531 
+[epoch 5] step 24/44: loss=0.4531 
+[epoch 5] step 26/44: loss=0.4518 
+[epoch 5] step 28/44: loss=0.4487 
+[epoch 5] step 30/44: loss=0.4497 
+[epoch 5] step 32/44: loss=0.4487 
+[epoch 5] step 34/44: loss=0.4522 
+[epoch 5] step 36/44: loss=0.4526 
+[epoch 5] step 38/44: loss=0.4525 
+[epoch 5] step 40/44: loss=0.4513 
+[epoch 5] step 42/44: loss=0.4497 
+[epoch 5] step 44/44: loss=0.4482 
+[epoch 5] val_loss=1.0125 qwk=('0.5196', '0.5562', '0.3902') averageQWK=0.4887 macroEMD=0.2382 tailR0=('0.0217', '0.0000', '0.0000') tailR0avg=0.0072
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    7    3    0    0
+     0   16   38    1    0
+     0    4  116    5    0
+     0    1   64   49    2
+     0    0    8   14    1
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    5    4    0    0
+     0   21   31    1    0
+     0    9  103   10    0
+     0    1   63   69    0
+     0    0    3    9    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    1    3    0    0
+     0   10   59    0    0
+     0    5  135   12    0
+     0    0   65   37    0
+     0    0    0    2    0
+[epoch 6] step 2/44: loss=0.4458 
+[epoch 6] step 4/44: loss=0.4636 
+[epoch 6] step 6/44: loss=0.4472 
+[epoch 6] step 8/44: loss=0.4477 
+[epoch 6] step 10/44: loss=0.4429 
+[epoch 6] step 12/44: loss=0.4395 
+[epoch 6] step 14/44: loss=0.4365 
+[epoch 6] step 16/44: loss=0.4321 
+[epoch 6] step 18/44: loss=0.4272 
+[epoch 6] step 20/44: loss=0.4259 
+[epoch 6] step 22/44: loss=0.4251 
+[epoch 6] step 24/44: loss=0.4211 
+[epoch 6] step 26/44: loss=0.4206 
+[epoch 6] step 28/44: loss=0.4162 
+[epoch 6] step 30/44: loss=0.4155 
+[epoch 6] step 32/44: loss=0.4164 
+[epoch 6] step 34/44: loss=0.4130 
+[epoch 6] step 36/44: loss=0.4149 
+[epoch 6] step 38/44: loss=0.4160 
+[epoch 6] step 40/44: loss=0.4170 
+[epoch 6] step 42/44: loss=0.4149 
+[epoch 6] step 44/44: loss=0.4121 
+[epoch 6] val_loss=0.9525 qwk=('0.6263', '0.5173', '0.5604') averageQWK=0.5680 macroEMD=0.2166 tailR0=('0.0217', '0.0000', '0.0000') tailR0avg=0.0072
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    7    3    0    0
+     0   16   37    2    0
+     0    5   95   25    0
+     0    1   31   82    2
+     0    0    1   21    1
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    4    4    1    0
+     0    3   48    2    0
+     0    1   99   22    0
+     0    0   45   88    0
+     0    0    0   12    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    3    1    0    0
+     0   27   42    0    0
+     0   14  124   14    0
+     0    0   53   49    0
+     0    0    0    2    0
+[epoch 7] step 2/44: loss=0.3874 
+[epoch 7] step 4/44: loss=0.3795 
+[epoch 7] step 6/44: loss=0.3761 
+[epoch 7] step 8/44: loss=0.3674 
+[epoch 7] step 10/44: loss=0.3675 
+[epoch 7] step 12/44: loss=0.3605 
+[epoch 7] step 14/44: loss=0.3675 
+[epoch 7] step 16/44: loss=0.3704 
+[epoch 7] step 18/44: loss=0.3753 
+[epoch 7] step 20/44: loss=0.3762 
+[epoch 7] step 22/44: loss=0.3751 
+[epoch 7] step 24/44: loss=0.3760 
+[epoch 7] step 26/44: loss=0.3725 
+[epoch 7] step 28/44: loss=0.3751 
+[epoch 7] step 30/44: loss=0.3737 
+[epoch 7] step 32/44: loss=0.3693 
+[epoch 7] step 34/44: loss=0.3683 
+[epoch 7] step 36/44: loss=0.3701 
+[epoch 7] step 38/44: loss=0.3723 
+[epoch 7] step 40/44: loss=0.3726 
+[epoch 7] step 42/44: loss=0.3771 
+[epoch 7] step 44/44: loss=0.3761 
+[epoch 7] val_loss=0.9561 qwk=('0.6357', '0.6089', '0.5474') averageQWK=0.5974 macroEMD=0.2119 tailR0=('0.0000', '0.0000', '0.0000') tailR0avg=0.0000
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    8    2    0    0
+     0   16   37    2    0
+     0    6   90   29    0
+     0    1   26   89    0
+     0    0    1   22    0
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    7    1    1    0
+     0   21   30    2    0
+     0   14   84   24    0
+     0    4   34   95    0
+     0    0    0   12    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    2    2    0    0
+     0   31   37    1    0
+     0   18  119   15    0
+     0    0   54   48    0
+     0    0    0    2    0
+[epoch 8] step 2/44: loss=0.3479 
+[epoch 8] step 4/44: loss=0.3398 
+[epoch 8] step 6/44: loss=0.3553 
+[epoch 8] step 8/44: loss=0.3431 
+[epoch 8] step 10/44: loss=0.3414 
+[epoch 8] step 12/44: loss=0.3622 
+[epoch 8] step 14/44: loss=0.3592 
+[epoch 8] step 16/44: loss=0.3531 
+[epoch 8] step 18/44: loss=0.3603 
+[epoch 8] step 20/44: loss=0.3632 
+[epoch 8] step 22/44: loss=0.3573 
+[epoch 8] step 24/44: loss=0.3632 
+[epoch 8] step 26/44: loss=0.3690 
+[epoch 8] step 28/44: loss=0.3684 
+[epoch 8] step 30/44: loss=0.3692 
+[epoch 8] step 32/44: loss=0.3692 
+[epoch 8] step 34/44: loss=0.3757 
+[epoch 8] step 36/44: loss=0.3796 
+[epoch 8] step 38/44: loss=0.3783 
+[epoch 8] step 40/44: loss=0.3731 
+[epoch 8] step 42/44: loss=0.3724 
+[epoch 8] step 44/44: loss=0.3732 
+[epoch 8] val_loss=0.9974 qwk=('0.6395', '0.5883', '0.6005') averageQWK=0.6094 macroEMD=0.2061 tailR0=('0.2826', '0.0000', '0.0000') tailR0avg=0.0942
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    8    1    1    0
+     0   18   33    4    0
+     0    6   76   38    5
+     0    2   16   84   14
+     0    0    1    9   13
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    7    1    1    0
+     0   22   22    9    0
+     0   10   55   57    0
+     0    3    8  122    0
+     0    0    0   12    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    2    2    0    0
+     0   28   38    3    0
+     0   12   82   58    0
+     0    0   15   87    0
+     0    0    0    2    0
+[epoch 9] step 2/44: loss=0.3588 
+[epoch 9] step 4/44: loss=0.3553 
+[epoch 9] step 6/44: loss=0.3599 
+[epoch 9] step 8/44: loss=0.3637 
+[epoch 9] step 10/44: loss=0.3527 
+[epoch 9] step 12/44: loss=0.3473 
+[epoch 9] step 14/44: loss=0.3505 
+[epoch 9] step 16/44: loss=0.3478 
+[epoch 9] step 18/44: loss=0.3505 
+[epoch 9] step 20/44: loss=0.3425 
+[epoch 9] step 22/44: loss=0.3374 
+[epoch 9] step 24/44: loss=0.3359 
+[epoch 9] step 26/44: loss=0.3335 
+[epoch 9] step 28/44: loss=0.3334 
+[epoch 9] step 30/44: loss=0.3335 
+[epoch 9] step 32/44: loss=0.3312 
+[epoch 9] step 34/44: loss=0.3267 
+[epoch 9] step 36/44: loss=0.3239 
+[epoch 9] step 38/44: loss=0.3227 
+[epoch 9] step 40/44: loss=0.3226 
+[epoch 9] step 42/44: loss=0.3223 
+[epoch 9] step 44/44: loss=0.3189 
+[epoch 9] val_loss=1.0844 qwk=('0.6074', '0.6076', '0.5754') averageQWK=0.5968 macroEMD=0.1998 tailR0=('0.2609', '0.0000', '0.0000') tailR0avg=0.0870
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    7    2    1    0
+     0   15   34    6    0
+     0    5   68   49    3
+     0    1   17   84   14
+     0    0    1   10   12
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    7    1    1    0
+     0   19   28    6    0
+     0    9   70   43    0
+     0    2   17  114    0
+     0    0    0   12    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    2    2    0    0
+     0   23   45    1    0
+     0   11  115   26    0
+     0    0   36   66    0
+     0    0    0    2    0
+[epoch 10] step 2/44: loss=0.3152 
+[epoch 10] step 4/44: loss=0.3063 
+[epoch 10] step 6/44: loss=0.2977 
+[epoch 10] step 8/44: loss=0.2893 
+[epoch 10] step 10/44: loss=0.2949 
+[epoch 10] step 12/44: loss=0.2871 
+[epoch 10] step 14/44: loss=0.2830 
+[epoch 10] step 16/44: loss=0.2791 
+[epoch 10] step 18/44: loss=0.2781 
+[epoch 10] step 20/44: loss=0.2744 
+[epoch 10] step 22/44: loss=0.2756 
+[epoch 10] step 24/44: loss=0.2704 
+[epoch 10] step 26/44: loss=0.2712 
+[epoch 10] step 28/44: loss=0.2751 
+[epoch 10] step 30/44: loss=0.2759 
+[epoch 10] step 32/44: loss=0.2759 
+[epoch 10] step 34/44: loss=0.2771 
+[epoch 10] step 36/44: loss=0.2769 
+[epoch 10] step 38/44: loss=0.2780 
+[epoch 10] step 40/44: loss=0.2784 
+[epoch 10] step 42/44: loss=0.2761 
+[epoch 10] step 44/44: loss=0.2785 
+[epoch 10] val_loss=1.1487 qwk=('0.6161', '0.5702', '0.5556') averageQWK=0.5806 macroEMD=0.2053 tailR0=('0.1087', '0.0000', '0.0000') tailR0avg=0.0362
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    8    1    1    0
+     0   19   28    8    0
+     0    5   68   52    0
+     0    2    8  102    4
+     0    0    1   17    5
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    5    3    1    0
+     0   13   32    8    0
+     0    6   66   50    0
+     0    1   10  122    0
+     0    0    0   12    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    1    3    0    0
+     0   18   48    3    0
+     0    7  104   41    0
+     0    0   23   79    0
+     0    0    0    2    0
+[epoch 11] step 2/44: loss=0.2246 
+[epoch 11] step 4/44: loss=0.2410 
+[epoch 11] step 6/44: loss=0.2600 
+[epoch 11] step 8/44: loss=0.2568 
+[epoch 11] step 10/44: loss=0.2556 
+[epoch 11] step 12/44: loss=0.2543 
+[epoch 11] step 14/44: loss=0.2560 
+[epoch 11] step 16/44: loss=0.2590 
+[epoch 11] step 18/44: loss=0.2578 
+[epoch 11] step 20/44: loss=0.2588 
+[epoch 11] step 22/44: loss=0.2638 
+[epoch 11] step 24/44: loss=0.2638 
+[epoch 11] step 26/44: loss=0.2615 
+[epoch 11] step 28/44: loss=0.2602 
+[epoch 11] step 30/44: loss=0.2612 
+[epoch 11] step 32/44: loss=0.2610 
+[epoch 11] step 34/44: loss=0.2596 
+[epoch 11] step 36/44: loss=0.2600 
+[epoch 11] step 38/44: loss=0.2601 
+[epoch 11] step 40/44: loss=0.2606 
+[epoch 11] step 42/44: loss=0.2588 
+[epoch 11] step 44/44: loss=0.2603 
+[epoch 11] val_loss=1.1672 qwk=('0.5505', '0.5447', '0.5182') averageQWK=0.5378 macroEMD=0.2032 tailR0=('0.0217', '0.0556', '0.0000') tailR0avg=0.0258
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    8    2    0    0
+     0   23   31    1    0
+     0   21   87   17    0
+     0    2   51   60    3
+     0    1    6   15    1
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    6    2    0    0
+     0   22   29    2    0
+     0   17   93   12    0
+     0    6   56   71    0
+     0    0    3    9    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    3    1    0    0
+     0   38   31    0    0
+     0   30  116    6    0
+     0    2   65   35    0
+     0    0    1    1    0
+[epoch 12] step 2/44: loss=0.3200 
+[epoch 12] step 4/44: loss=0.3024 
+[epoch 12] step 6/44: loss=0.2778 
+[epoch 12] step 8/44: loss=0.2628 
+[epoch 12] step 10/44: loss=0.2520 
+[epoch 12] step 12/44: loss=0.2567 
+[epoch 12] step 14/44: loss=0.2543 
+[epoch 12] step 16/44: loss=0.2498 
+[epoch 12] step 18/44: loss=0.2470 
+[epoch 12] step 20/44: loss=0.2413 
+[epoch 12] step 22/44: loss=0.2411 
+[epoch 12] step 24/44: loss=0.2407 
+[epoch 12] step 26/44: loss=0.2383 
+[epoch 12] step 28/44: loss=0.2362 
+[epoch 12] step 30/44: loss=0.2338 
+[epoch 12] step 32/44: loss=0.2334 
+[epoch 12] step 34/44: loss=0.2295 
+[epoch 12] step 36/44: loss=0.2294 
+[epoch 12] step 38/44: loss=0.2314 
+[epoch 12] step 40/44: loss=0.2304 
+[epoch 12] step 42/44: loss=0.2271 
+[epoch 12] step 44/44: loss=0.2241 
+[epoch 12] val_loss=1.2319 qwk=('0.5896', '0.5508', '0.5459') averageQWK=0.5621 macroEMD=0.1975 tailR0=('0.1304', '0.0556', '0.0000') tailR0avg=0.0620
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    6    4    0    0
+     0   15   35    5    0
+     0    5   73   44    3
+     0    1   21   86    8
+     0    0    1   16    6
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    3    4    1    0
+     0   12   33    8    0
+     0    5   68   49    0
+     0    1   15  117    0
+     0    0    0   12    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    2    2    0    0
+     0   24   43    2    0
+     0   15  107   30    0
+     0    1   36   65    0
+     0    0    0    2    0
+[epoch 13] step 2/44: loss=0.2280 
+[epoch 13] step 4/44: loss=0.2284 
+[epoch 13] step 6/44: loss=0.2309 
+[epoch 13] step 8/44: loss=0.2332 
+[epoch 13] step 10/44: loss=0.2176 
+[epoch 13] step 12/44: loss=0.2148 
+[epoch 13] step 14/44: loss=0.2121 
+[epoch 13] step 16/44: loss=0.2117 
+[epoch 13] step 18/44: loss=0.2084 
+[epoch 13] step 20/44: loss=0.2079 
+[epoch 13] step 22/44: loss=0.2097 
+[epoch 13] step 24/44: loss=0.2113 
+[epoch 13] step 26/44: loss=0.2098 
+[epoch 13] step 28/44: loss=0.2117 
+[epoch 13] step 30/44: loss=0.2122 
+[epoch 13] step 32/44: loss=0.2102 
+[epoch 13] step 34/44: loss=0.2102 
+[epoch 13] step 36/44: loss=0.2113 
+[epoch 13] step 38/44: loss=0.2108 
+[epoch 13] step 40/44: loss=0.2118 
+[epoch 13] step 42/44: loss=0.2109 
+[epoch 13] step 44/44: loss=0.2118 
+[epoch 13] val_loss=1.2298 qwk=('0.5958', '0.6082', '0.5802') averageQWK=0.5947 macroEMD=0.1903 tailR0=('0.3109', '0.1389', '0.0000') tailR0avg=0.1499
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    3    1    0
+     0   18   32    5    0
+     0    6   75   33   11
+     0    1   19   73   23
+     0    0    1   10   12
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    2    1    0
+     0   20   24    9    0
+     0    7   67   46    2
+     0    1   10  114    8
+     0    0    0   10    2
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     0    2    2    0    0
+     0   26   42    1    0
+     0   15   99   38    0
+     0    1   28   73    0
+     0    0    0    2    0
+[epoch 14] step 2/44: loss=0.2108 
+[epoch 14] step 4/44: loss=0.2053 
+[epoch 14] step 6/44: loss=0.1990 
+[epoch 14] step 8/44: loss=0.2007 
+[epoch 14] step 10/44: loss=0.2077 
+[epoch 14] step 12/44: loss=0.2053 
+[epoch 14] step 14/44: loss=0.2030 
+[epoch 14] step 16/44: loss=0.1989 
+[epoch 14] step 18/44: loss=0.1958 
+[epoch 14] step 20/44: loss=0.1915 
+[epoch 14] step 22/44: loss=0.1925 
+[epoch 14] step 24/44: loss=0.1912 
+[epoch 14] step 26/44: loss=0.1920 
+[epoch 14] step 28/44: loss=0.1918 
+[epoch 14] step 30/44: loss=0.1942 
+[epoch 14] step 32/44: loss=0.1932 
+[epoch 14] step 34/44: loss=0.1912 
+[epoch 14] step 36/44: loss=0.1910 
+[epoch 14] step 38/44: loss=0.1910 
+[epoch 14] step 40/44: loss=0.1914 
+[epoch 14] step 42/44: loss=0.1919 
+[epoch 14] step 44/44: loss=0.1916 
+[epoch 14] val_loss=1.2115 qwk=('0.6429', '0.5974', '0.5768') averageQWK=0.6057 macroEMD=0.1903 tailR0=('0.2304', '0.0972', '0.1250') tailR0avg=0.1509
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     2    5    3    0    0
+     0   20   32    3    0
+     0    6   88   31    0
+     0    1   35   76    4
+     0    0    1   16    6
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    2    1    0
+     0   18   31    4    0
+     0    9   82   31    0
+     0    2   30  101    0
+     0    0    1   10    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   30   39    0    0
+     0   18  119   15    0
+     0    1   47   54    0
+     0    0    0    2    0
+[epoch 15] step 2/44: loss=0.1959 
+[epoch 15] step 4/44: loss=0.1743 
+[epoch 15] step 6/44: loss=0.1768 
+[epoch 15] step 8/44: loss=0.1691 
+[epoch 15] step 10/44: loss=0.1703 
+[epoch 15] step 12/44: loss=0.1692 
+[epoch 15] step 14/44: loss=0.1653 
+[epoch 15] step 16/44: loss=0.1644 
+[epoch 15] step 18/44: loss=0.1657 
+[epoch 15] step 20/44: loss=0.1651 
+[epoch 15] step 22/44: loss=0.1637 
+[epoch 15] step 24/44: loss=0.1622 
+[epoch 15] step 26/44: loss=0.1654 
+[epoch 15] step 28/44: loss=0.1626 
+[epoch 15] step 30/44: loss=0.1598 
+[epoch 15] step 32/44: loss=0.1587 
+[epoch 15] step 34/44: loss=0.1578 
+[epoch 15] step 36/44: loss=0.1573 
+[epoch 15] step 38/44: loss=0.1565 
+[epoch 15] step 40/44: loss=0.1558 
+[epoch 15] step 42/44: loss=0.1563 
+[epoch 15] step 44/44: loss=0.1553 
+[epoch 15] val_loss=1.2983 qwk=('0.6330', '0.6037', '0.5341') averageQWK=0.5903 macroEMD=0.1899 tailR0=('0.2087', '0.0556', '0.1250') tailR0avg=0.1298
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     2    6    2    0    0
+     1   20   32    2    0
+     0   11   88   25    1
+     0    2   41   69    4
+     0    0    1   17    5
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    6    1    1    0
+     0   24   24    5    0
+     0   14   82   25    1
+     0    2   35   95    1
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   21   47    1    0
+     0   12  121   19    0
+     0    1   45   56    0
+     0    0    0    2    0
+[epoch 16] step 2/44: loss=0.1646 
+[epoch 16] step 4/44: loss=0.1671 
+[epoch 16] step 6/44: loss=0.1569 
+[epoch 16] step 8/44: loss=0.1509 
+[epoch 16] step 10/44: loss=0.1470 
+[epoch 16] step 12/44: loss=0.1448 
+[epoch 16] step 14/44: loss=0.1426 
+[epoch 16] step 16/44: loss=0.1397 
+[epoch 16] step 18/44: loss=0.1361 
+[epoch 16] step 20/44: loss=0.1349 
+[epoch 16] step 22/44: loss=0.1348 
+[epoch 16] step 24/44: loss=0.1342 
+[epoch 16] step 26/44: loss=0.1345 
+[epoch 16] step 28/44: loss=0.1339 
+[epoch 16] step 30/44: loss=0.1312 
+[epoch 16] step 32/44: loss=0.1300 
+[epoch 16] step 34/44: loss=0.1297 
+[epoch 16] step 36/44: loss=0.1302 
+[epoch 16] step 38/44: loss=0.1287 
+[epoch 16] step 40/44: loss=0.1280 
+[epoch 16] step 42/44: loss=0.1286 
+[epoch 16] step 44/44: loss=0.1286 
+[epoch 16] val_loss=1.3934 qwk=('0.5820', '0.5630', '0.5787') averageQWK=0.5745 macroEMD=0.1896 tailR0=('0.1652', '0.1528', '0.1250') tailR0avg=0.1477
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     2    6    2    0    0
+     1   20   32    2    0
+     0   14   90   20    1
+     0    1   52   57    6
+     0    0    5   15    3
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     2    5    2    0    0
+     1   23   27    2    0
+     0   15   96   10    1
+     0    6   54   73    0
+     0    0    4    7    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   38   31    0    0
+     0   25  110   17    0
+     0    2   49   51    0
+     0    0    0    2    0
+[epoch 17] step 2/44: loss=0.1260 
+[epoch 17] step 4/44: loss=0.1208 
+[epoch 17] step 6/44: loss=0.1215 
+[epoch 17] step 8/44: loss=0.1191 
+[epoch 17] step 10/44: loss=0.1172 
+[epoch 17] step 12/44: loss=0.1161 
+[epoch 17] step 14/44: loss=0.1138 
+[epoch 17] step 16/44: loss=0.1155 
+[epoch 17] step 18/44: loss=0.1145 
+[epoch 17] step 20/44: loss=0.1151 
+[epoch 17] step 22/44: loss=0.1118 
+[epoch 17] step 24/44: loss=0.1107 
+[epoch 17] step 26/44: loss=0.1108 
+[epoch 17] step 28/44: loss=0.1102 
+[epoch 17] step 30/44: loss=0.1106 
+[epoch 17] step 32/44: loss=0.1116 
+[epoch 17] step 34/44: loss=0.1105 
+[epoch 17] step 36/44: loss=0.1105 
+[epoch 17] step 38/44: loss=0.1112 
+[epoch 17] step 40/44: loss=0.1111 
+[epoch 17] step 42/44: loss=0.1110 
+[epoch 17] step 44/44: loss=0.1108 
+[epoch 17] val_loss=1.4389 qwk=('0.5710', '0.5641', '0.5268') averageQWK=0.5540 macroEMD=0.1974 tailR0=('0.1152', '0.0972', '0.1250') tailR0avg=0.1125
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    4    1    0
+     0   15   37    3    0
+     0    3   82   39    1
+     0    0   34   78    4
+     0    0    1   19    3
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    4    0    0
+     0   16   33    4    0
+     0    7   89   25    1
+     0    3   36   92    2
+     0    0    2    9    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   28   41    0    0
+     0   20  114   17    1
+     0    1   53   48    0
+     0    0    0    2    0
+[epoch 18] step 2/44: loss=0.1024 
+[epoch 18] step 4/44: loss=0.1055 
+[epoch 18] step 6/44: loss=0.1002 
+[epoch 18] step 8/44: loss=0.1032 
+[epoch 18] step 10/44: loss=0.0988 
+[epoch 18] step 12/44: loss=0.0923 
+[epoch 18] step 14/44: loss=0.0896 
+[epoch 18] step 16/44: loss=0.0891 
+[epoch 18] step 18/44: loss=0.0915 
+[epoch 18] step 20/44: loss=0.0935 
+[epoch 18] step 22/44: loss=0.0938 
+[epoch 18] step 24/44: loss=0.0926 
+[epoch 18] step 26/44: loss=0.0926 
+[epoch 18] step 28/44: loss=0.0931 
+[epoch 18] step 30/44: loss=0.0928 
+[epoch 18] step 32/44: loss=0.0922 
+[epoch 18] step 34/44: loss=0.0927 
+[epoch 18] step 36/44: loss=0.0933 
+[epoch 18] step 38/44: loss=0.0941 
+[epoch 18] step 40/44: loss=0.0942 
+[epoch 18] step 42/44: loss=0.0954 
+[epoch 18] step 44/44: loss=0.0952 
+[epoch 18] val_loss=1.4940 qwk=('0.5932', '0.5853', '0.5284') averageQWK=0.5690 macroEMD=0.1910 tailR0=('0.1152', '0.0556', '0.1250') tailR0avg=0.0986
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    6    2    1    0
+     0   18   34    3    0
+     0   10   83   32    0
+     0    2   35   76    3
+     0    0    1   19    3
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    3    0    0
+     0   22   27    4    0
+     0   13   92   17    0
+     0    4   44   85    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    2    1    0    0
+     0   28   41    0    0
+     0   24  112   16    0
+     0    1   56   45    0
+     0    0    0    2    0
+[epoch 19] step 2/44: loss=0.1016 
+[epoch 19] step 4/44: loss=0.0920 
+[epoch 19] step 6/44: loss=0.1014 
+[epoch 19] step 8/44: loss=0.1000 
+[epoch 19] step 10/44: loss=0.0963 
+[epoch 19] step 12/44: loss=0.0946 
+[epoch 19] step 14/44: loss=0.0976 
+[epoch 19] step 16/44: loss=0.0957 
+[epoch 19] step 18/44: loss=0.0913 
+[epoch 19] step 20/44: loss=0.0905 
+[epoch 19] step 22/44: loss=0.0877 
+[epoch 19] step 24/44: loss=0.0864 
+[epoch 19] step 26/44: loss=0.0853 
+[epoch 19] step 28/44: loss=0.0842 
+[epoch 19] step 30/44: loss=0.0843 
+[epoch 19] step 32/44: loss=0.0838 
+[epoch 19] step 34/44: loss=0.0826 
+[epoch 19] step 36/44: loss=0.0818 
+[epoch 19] step 38/44: loss=0.0819 
+[epoch 19] step 40/44: loss=0.0803 
+[epoch 19] step 42/44: loss=0.0802 
+[epoch 19] step 44/44: loss=0.0794 
+[epoch 19] val_loss=1.5820 qwk=('0.5929', '0.5705', '0.5746') averageQWK=0.5794 macroEMD=0.1925 tailR0=('0.2457', '0.0972', '0.1250') tailR0avg=0.1560
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    3    6    0    0
+     0   17   35    3    0
+     0    4   93   23    5
+     0    0   33   70   13
+     0    0    4   10    9
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    2    2    0
+     0   17   27    9    0
+     0    7   70   45    0
+     0    2   13  117    1
+     0    0    0   11    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   26   42    1    0
+     0   15  107   30    0
+     0    1   35   66    0
+     0    0    0    2    0
+[epoch 20] step 2/44: loss=0.0630 
+[epoch 20] step 4/44: loss=0.0758 
+[epoch 20] step 6/44: loss=0.0729 
+[epoch 20] step 8/44: loss=0.0747 
+[epoch 20] step 10/44: loss=0.0676 
+[epoch 20] step 12/44: loss=0.0680 
+[epoch 20] step 14/44: loss=0.0654 
+[epoch 20] step 16/44: loss=0.0652 
+[epoch 20] step 18/44: loss=0.0640 
+[epoch 20] step 20/44: loss=0.0640 
+[epoch 20] step 22/44: loss=0.0638 
+[epoch 20] step 24/44: loss=0.0639 
+[epoch 20] step 26/44: loss=0.0646 
+[epoch 20] step 28/44: loss=0.0654 
+[epoch 20] step 30/44: loss=0.0654 
+[epoch 20] step 32/44: loss=0.0660 
+[epoch 20] step 34/44: loss=0.0660 
+[epoch 20] step 36/44: loss=0.0658 
+[epoch 20] step 38/44: loss=0.0656 
+[epoch 20] step 40/44: loss=0.0665 
+[epoch 20] step 42/44: loss=0.0669 
+[epoch 20] step 44/44: loss=0.0666 
+[epoch 20] val_loss=1.6434 qwk=('0.6026', '0.5838', '0.5225') averageQWK=0.5696 macroEMD=0.1938 tailR0=('0.0935', '0.0556', '0.1250') tailR0avg=0.0913
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    4    0    0
+     1   16   32    6    0
+     0    3   88   34    0
+     0    1   24   88    3
+     0    0    2   19    2
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    1    2    0
+     0   17   32    4    0
+     0    5   89   28    0
+     0    0   34   99    0
+     0    0    2   10    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   25   43    1    0
+     0   17  115   20    0
+     0    1   50   51    0
+     0    0    0    2    0
+[epoch 21] step 2/44: loss=0.0409 
+[epoch 21] step 4/44: loss=0.0534 
+[epoch 21] step 6/44: loss=0.0622 
+[epoch 21] step 8/44: loss=0.0619 
+[epoch 21] step 10/44: loss=0.0582 
+[epoch 21] step 12/44: loss=0.0573 
+[epoch 21] step 14/44: loss=0.0552 
+[epoch 21] step 16/44: loss=0.0533 
+[epoch 21] step 18/44: loss=0.0537 
+[epoch 21] step 20/44: loss=0.0525 
+[epoch 21] step 22/44: loss=0.0516 
+[epoch 21] step 24/44: loss=0.0510 
+[epoch 21] step 26/44: loss=0.0509 
+[epoch 21] step 28/44: loss=0.0508 
+[epoch 21] step 30/44: loss=0.0504 
+[epoch 21] step 32/44: loss=0.0497 
+[epoch 21] step 34/44: loss=0.0501 
+[epoch 21] step 36/44: loss=0.0510 
+[epoch 21] step 38/44: loss=0.0506 
+[epoch 21] step 40/44: loss=0.0504 
+[epoch 21] step 42/44: loss=0.0500 
+[epoch 21] step 44/44: loss=0.0519 
+[epoch 21] val_loss=1.6782 qwk=('0.5881', '0.6016', '0.5403') averageQWK=0.5767 macroEMD=0.1864 tailR0=('0.1435', '0.0972', '0.1250') tailR0avg=0.1219
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     2    5    3    0    0
+     1   18   33    3    0
+     0    7   90   27    1
+     0    1   40   69    6
+     0    0    4   17    2
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    2    1    0
+     0   23   26    4    0
+     0    9   85   27    1
+     0    2   33   96    2
+     0    0    2    9    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   29   39    1    0
+     0   17  114   21    0
+     0    1   50   51    0
+     0    0    0    2    0
+[epoch 22] step 2/44: loss=0.0465 
+[epoch 22] step 4/44: loss=0.0430 
+[epoch 22] step 6/44: loss=0.0383 
+[epoch 22] step 8/44: loss=0.0414 
+[epoch 22] step 10/44: loss=0.0395 
+[epoch 22] step 12/44: loss=0.0402 
+[epoch 22] step 14/44: loss=0.0394 
+[epoch 22] step 16/44: loss=0.0414 
+[epoch 22] step 18/44: loss=0.0401 
+[epoch 22] step 20/44: loss=0.0403 
+[epoch 22] step 22/44: loss=0.0403 
+[epoch 22] step 24/44: loss=0.0403 
+[epoch 22] step 26/44: loss=0.0405 
+[epoch 22] step 28/44: loss=0.0402 
+[epoch 22] step 30/44: loss=0.0401 
+[epoch 22] step 32/44: loss=0.0405 
+[epoch 22] step 34/44: loss=0.0402 
+[epoch 22] step 36/44: loss=0.0406 
+[epoch 22] step 38/44: loss=0.0404 
+[epoch 22] step 40/44: loss=0.0413 
+[epoch 22] step 42/44: loss=0.0409 
+[epoch 22] step 44/44: loss=0.0418 
+[epoch 22] val_loss=1.6975 qwk=('0.6154', '0.5777', '0.5680') averageQWK=0.5870 macroEMD=0.1844 tailR0=('0.1804', '0.0972', '0.1250') tailR0avg=0.1342
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    6    2    1    0
+     0   22   29    4    0
+     0   12   79   33    1
+     0    1   30   79    6
+     0    1    0   16    6
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    4    0    0
+     0   18   32    3    0
+     0    9   90   22    1
+     0    1   44   84    4
+     0    0    2    9    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   27   41    1    0
+     0   14  112   26    0
+     0    1   40   61    0
+     0    0    0    2    0
+[epoch 23] step 2/44: loss=0.0431 
+[epoch 23] step 4/44: loss=0.0381 
+[epoch 23] step 6/44: loss=0.0382 
+[epoch 23] step 8/44: loss=0.0361 
+[epoch 23] step 10/44: loss=0.0352 
+[epoch 23] step 12/44: loss=0.0361 
+[epoch 23] step 14/44: loss=0.0381 
+[epoch 23] step 16/44: loss=0.0372 
+[epoch 23] step 18/44: loss=0.0374 
+[epoch 23] step 20/44: loss=0.0389 
+[epoch 23] step 22/44: loss=0.0384 
+[epoch 23] step 24/44: loss=0.0373 
+[epoch 23] step 26/44: loss=0.0375 
+[epoch 23] step 28/44: loss=0.0376 
+[epoch 23] step 30/44: loss=0.0369 
+[epoch 23] step 32/44: loss=0.0365 
+[epoch 23] step 34/44: loss=0.0364 
+[epoch 23] step 36/44: loss=0.0359 
+[epoch 23] step 38/44: loss=0.0367 
+[epoch 23] step 40/44: loss=0.0363 
+[epoch 23] step 42/44: loss=0.0360 
+[epoch 23] step 44/44: loss=0.0373 
+[epoch 23] val_loss=1.8143 qwk=('0.6223', '0.5956', '0.5307') averageQWK=0.5829 macroEMD=0.1885 tailR0=('0.1370', '0.0972', '0.1250') tailR0avg=0.1197
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    4    0    0
+     0   17   35    3    0
+     0    5   86   33    1
+     0    1   27   83    5
+     0    0    1   18    4
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   18   28    7    0
+     0    6   67   49    0
+     0    1   15  117    0
+     0    0    0   11    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   21   47    1    0
+     0   13  115   23    1
+     0    1   42   59    0
+     0    0    0    2    0
+[epoch 24] step 2/44: loss=0.0250 
+[epoch 24] step 4/44: loss=0.0271 
+[epoch 24] step 6/44: loss=0.0252 
+[epoch 24] step 8/44: loss=0.0278 
+[epoch 24] step 10/44: loss=0.0276 
+[epoch 24] step 12/44: loss=0.0272 
+[epoch 24] step 14/44: loss=0.0273 
+[epoch 24] step 16/44: loss=0.0278 
+[epoch 24] step 18/44: loss=0.0281 
+[epoch 24] step 20/44: loss=0.0277 
+[epoch 24] step 22/44: loss=0.0286 
+[epoch 24] step 24/44: loss=0.0284 
+[epoch 24] step 26/44: loss=0.0287 
+[epoch 24] step 28/44: loss=0.0292 
+[epoch 24] step 30/44: loss=0.0286 
+[epoch 24] step 32/44: loss=0.0284 
+[epoch 24] step 34/44: loss=0.0287 
+[epoch 24] step 36/44: loss=0.0287 
+[epoch 24] step 38/44: loss=0.0290 
+[epoch 24] step 40/44: loss=0.0294 
+[epoch 24] step 42/44: loss=0.0292 
+[epoch 24] step 44/44: loss=0.0288 
+[epoch 24] val_loss=1.8414 qwk=('0.6161', '0.6005', '0.5192') averageQWK=0.5786 macroEMD=0.1885 tailR0=('0.1152', '0.0556', '0.1250') tailR0avg=0.0986
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    6    3    0    0
+     0   17   35    3    0
+     0    6   80   38    1
+     0    1   27   85    3
+     0    0    1   19    3
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    2    1    0
+     0   20   29    4    0
+     0    8   84   30    0
+     0    1   34   98    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   22   46    1    0
+     0   15  117   20    0
+     0    1   48   53    0
+     0    0    0    2    0
+[epoch 25] step 2/44: loss=0.0201 
+[epoch 25] step 4/44: loss=0.0234 
+[epoch 25] step 6/44: loss=0.0223 
+[epoch 25] step 8/44: loss=0.0223 
+[epoch 25] step 10/44: loss=0.0214 
+[epoch 25] step 12/44: loss=0.0212 
+[epoch 25] step 14/44: loss=0.0216 
+[epoch 25] step 16/44: loss=0.0223 
+[epoch 25] step 18/44: loss=0.0223 
+[epoch 25] step 20/44: loss=0.0231 
+[epoch 25] step 22/44: loss=0.0229 
+[epoch 25] step 24/44: loss=0.0227 
+[epoch 25] step 26/44: loss=0.0223 
+[epoch 25] step 28/44: loss=0.0218 
+[epoch 25] step 30/44: loss=0.0216 
+[epoch 25] step 32/44: loss=0.0218 
+[epoch 25] step 34/44: loss=0.0213 
+[epoch 25] step 36/44: loss=0.0213 
+[epoch 25] step 38/44: loss=0.0216 
+[epoch 25] step 40/44: loss=0.0214 
+[epoch 25] step 42/44: loss=0.0215 
+[epoch 25] step 44/44: loss=0.0213 
+[epoch 25] val_loss=1.8667 qwk=('0.5915', '0.5934', '0.5308') averageQWK=0.5719 macroEMD=0.1853 tailR0=('0.1804', '0.0556', '0.1250') tailR0avg=0.1203
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    6    3    0    0
+     2   19   31    3    0
+     0   11   95   17    2
+     0    1   47   63    5
+     0    0    5   12    6
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    2    1    0
+     0   20   28    5    0
+     0    9   79   34    0
+     0    1   31  101    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   28   40    1    0
+     0   24  112   16    0
+     0    1   51   50    0
+     0    0    0    2    0
+[epoch 26] step 2/44: loss=0.0184 
+[epoch 26] step 4/44: loss=0.0190 
+[epoch 26] step 6/44: loss=0.0208 
+[epoch 26] step 8/44: loss=0.0221 
+[epoch 26] step 10/44: loss=0.0216 
+[epoch 26] step 12/44: loss=0.0209 
+[epoch 26] step 14/44: loss=0.0202 
+[epoch 26] step 16/44: loss=0.0194 
+[epoch 26] step 18/44: loss=0.0192 
+[epoch 26] step 20/44: loss=0.0188 
+[epoch 26] step 22/44: loss=0.0184 
+[epoch 26] step 24/44: loss=0.0182 
+[epoch 26] step 26/44: loss=0.0181 
+[epoch 26] step 28/44: loss=0.0183 
+[epoch 26] step 30/44: loss=0.0182 
+[epoch 26] step 32/44: loss=0.0189 
+[epoch 26] step 34/44: loss=0.0185 
+[epoch 26] step 36/44: loss=0.0183 
+[epoch 26] step 38/44: loss=0.0184 
+[epoch 26] step 40/44: loss=0.0181 
+[epoch 26] step 42/44: loss=0.0183 
+[epoch 26] step 44/44: loss=0.0182 
+[epoch 26] val_loss=1.9652 qwk=('0.6206', '0.5722', '0.5303') averageQWK=0.5744 macroEMD=0.1893 tailR0=('0.0717', '0.0972', '0.1250') tailR0avg=0.0980
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    6    3    0    0
+     0   18   34    3    0
+     0    7   85   33    0
+     0    1   29   84    2
+     0    0    1   21    1
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   16   33    4    0
+     0    9   78   35    0
+     0    3   27  103    0
+     0    0    1   10    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   21   46    2    0
+     0   12  108   31    1
+     0    1   37   64    0
+     0    0    0    2    0
+[epoch 27] step 2/44: loss=0.0154 
+[epoch 27] step 4/44: loss=0.0175 
+[epoch 27] step 6/44: loss=0.0183 
+[epoch 27] step 8/44: loss=0.0164 
+[epoch 27] step 10/44: loss=0.0155 
+[epoch 27] step 12/44: loss=0.0151 
+[epoch 27] step 14/44: loss=0.0152 
+[epoch 27] step 16/44: loss=0.0149 
+[epoch 27] step 18/44: loss=0.0155 
+[epoch 27] step 20/44: loss=0.0159 
+[epoch 27] step 22/44: loss=0.0159 
+[epoch 27] step 24/44: loss=0.0164 
+[epoch 27] step 26/44: loss=0.0162 
+[epoch 27] step 28/44: loss=0.0167 
+[epoch 27] step 30/44: loss=0.0165 
+[epoch 27] step 32/44: loss=0.0161 
+[epoch 27] step 34/44: loss=0.0161 
+[epoch 27] step 36/44: loss=0.0159 
+[epoch 27] step 38/44: loss=0.0160 
+[epoch 27] step 40/44: loss=0.0159 
+[epoch 27] step 42/44: loss=0.0160 
+[epoch 27] step 44/44: loss=0.0157 
+[epoch 27] val_loss=1.9864 qwk=('0.5893', '0.5927', '0.5338') averageQWK=0.5719 macroEMD=0.1874 tailR0=('0.0935', '0.0556', '0.1250') tailR0avg=0.0913
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    3    1    0
+     0   20   32    3    0
+     0    8   81   36    0
+     0    1   30   81    4
+     0    0    3   18    2
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   21   28    4    0
+     0   13   77   32    0
+     0    2   29  102    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   25   43    1    0
+     0   15  115   21    1
+     0    1   46   55    0
+     0    0    0    2    0
+[epoch 28] step 2/44: loss=0.0143 
+[epoch 28] step 4/44: loss=0.0127 
+[epoch 28] step 6/44: loss=0.0135 
+[epoch 28] step 8/44: loss=0.0129 
+[epoch 28] step 10/44: loss=0.0130 
+[epoch 28] step 12/44: loss=0.0133 
+[epoch 28] step 14/44: loss=0.0136 
+[epoch 28] step 16/44: loss=0.0137 
+[epoch 28] step 18/44: loss=0.0134 
+[epoch 28] step 20/44: loss=0.0139 
+[epoch 28] step 22/44: loss=0.0135 
+[epoch 28] step 24/44: loss=0.0132 
+[epoch 28] step 26/44: loss=0.0131 
+[epoch 28] step 28/44: loss=0.0128 
+[epoch 28] step 30/44: loss=0.0126 
+[epoch 28] step 32/44: loss=0.0125 
+[epoch 28] step 34/44: loss=0.0131 
+[epoch 28] step 36/44: loss=0.0129 
+[epoch 28] step 38/44: loss=0.0127 
+[epoch 28] step 40/44: loss=0.0125 
+[epoch 28] step 42/44: loss=0.0126 
+[epoch 28] step 44/44: loss=0.0124 
+[epoch 28] val_loss=2.0245 qwk=('0.5895', '0.6240', '0.5628') averageQWK=0.5921 macroEMD=0.1859 tailR0=('0.0717', '0.0972', '0.1250') tailR0avg=0.0980
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    4    0    0
+     0   20   32    3    0
+     0    9   84   31    1
+     0    1   33   78    4
+     0    0    3   19    1
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   22   27    4    0
+     0   12   70   40    0
+     0    1   19  113    0
+     0    0    1   10    1
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   32   36    1    0
+     0   22  109   20    1
+     0    1   45   56    0
+     0    0    0    2    0
+[epoch 29] step 2/44: loss=0.0085 
+[epoch 29] step 4/44: loss=0.0096 
+[epoch 29] step 6/44: loss=0.0093 
+[epoch 29] step 8/44: loss=0.0099 
+[epoch 29] step 10/44: loss=0.0100 
+[epoch 29] step 12/44: loss=0.0101 
+[epoch 29] step 14/44: loss=0.0101 
+[epoch 29] step 16/44: loss=0.0108 
+[epoch 29] step 18/44: loss=0.0109 
+[epoch 29] step 20/44: loss=0.0111 
+[epoch 29] step 22/44: loss=0.0112 
+[epoch 29] step 24/44: loss=0.0113 
+[epoch 29] step 26/44: loss=0.0115 
+[epoch 29] step 28/44: loss=0.0120 
+[epoch 29] step 30/44: loss=0.0117 
+[epoch 29] step 32/44: loss=0.0115 
+[epoch 29] step 34/44: loss=0.0113 
+[epoch 29] step 36/44: loss=0.0113 
+[epoch 29] step 38/44: loss=0.0113 
+[epoch 29] step 40/44: loss=0.0112 
+[epoch 29] step 42/44: loss=0.0110 
+[epoch 29] step 44/44: loss=0.0108 
+[epoch 29] val_loss=2.0598 qwk=('0.6162', '0.5895', '0.5574') averageQWK=0.5877 macroEMD=0.1862 tailR0=('0.1152', '0.0556', '0.1250') tailR0avg=0.0986
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    3    1    0
+     0   19   32    4    0
+     0    7   84   34    0
+     0    1   25   87    3
+     0    0    1   19    3
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   20   29    4    0
+     0   10   76   36    0
+     0    2   27  103    1
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   28   40    1    0
+     0   15  119   18    0
+     0    1   47   54    0
+     0    0    0    2    0
+[epoch 30] step 2/44: loss=0.0155 
+[epoch 30] step 4/44: loss=0.0141 
+[epoch 30] step 6/44: loss=0.0125 
+[epoch 30] step 8/44: loss=0.0120 
+[epoch 30] step 10/44: loss=0.0112 
+[epoch 30] step 12/44: loss=0.0106 
+[epoch 30] step 14/44: loss=0.0112 
+[epoch 30] step 16/44: loss=0.0111 
+[epoch 30] step 18/44: loss=0.0108 
+[epoch 30] step 20/44: loss=0.0108 
+[epoch 30] step 22/44: loss=0.0108 
+[epoch 30] step 24/44: loss=0.0106 
+[epoch 30] step 26/44: loss=0.0104 
+[epoch 30] step 28/44: loss=0.0101 
+[epoch 30] step 30/44: loss=0.0102 
+[epoch 30] step 32/44: loss=0.0101 
+[epoch 30] step 34/44: loss=0.0099 
+[epoch 30] step 36/44: loss=0.0098 
+[epoch 30] step 38/44: loss=0.0096 
+[epoch 30] step 40/44: loss=0.0095 
+[epoch 30] step 42/44: loss=0.0096 
+[epoch 30] step 44/44: loss=0.0096 
+[epoch 30] val_loss=2.0890 qwk=('0.5884', '0.5785', '0.5248') averageQWK=0.5639 macroEMD=0.1890 tailR0=('0.0717', '0.0556', '0.1250') tailR0avg=0.0841
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    3    1    0
+     0   20   31    4    0
+     0    9   81   35    0
+     0    1   32   81    2
+     0    0    1   21    1
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   19   30    4    0
+     0    9   88   25    0
+     0    2   37   92    2
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   26   42    1    0
+     0   14  119   19    0
+     0    1   52   49    0
+     0    0    0    2    0
+[epoch 31] step 2/44: loss=0.0084 
+[epoch 31] step 4/44: loss=0.0078 
+[epoch 31] step 6/44: loss=0.0075 
+[epoch 31] step 8/44: loss=0.0077 
+[epoch 31] step 10/44: loss=0.0078 
+[epoch 31] step 12/44: loss=0.0073 
+[epoch 31] step 14/44: loss=0.0077 
+[epoch 31] step 16/44: loss=0.0075 
+[epoch 31] step 18/44: loss=0.0077 
+[epoch 31] step 20/44: loss=0.0077 
+[epoch 31] step 22/44: loss=0.0079 
+[epoch 31] step 24/44: loss=0.0078 
+[epoch 31] step 26/44: loss=0.0080 
+[epoch 31] step 28/44: loss=0.0079 
+[epoch 31] step 30/44: loss=0.0078 
+[epoch 31] step 32/44: loss=0.0078 
+[epoch 31] step 34/44: loss=0.0077 
+[epoch 31] step 36/44: loss=0.0077 
+[epoch 31] step 38/44: loss=0.0076 
+[epoch 31] step 40/44: loss=0.0076 
+[epoch 31] step 42/44: loss=0.0078 
+[epoch 31] step 44/44: loss=0.0078 
+[epoch 31] val_loss=2.0904 qwk=('0.5922', '0.6032', '0.5374') averageQWK=0.5776 macroEMD=0.1864 tailR0=('0.1152', '0.0556', '0.1250') tailR0avg=0.0986
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    4    0    0
+     0   19   33    3    0
+     0    7   88   29    1
+     0    1   36   75    4
+     0    0    3   17    3
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   20   29    4    0
+     0   12   76   34    0
+     0    2   23  108    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   28   40    1    0
+     0   19  110   23    0
+     0    1   48   53    0
+     0    0    0    2    0
+[epoch 32] step 2/44: loss=0.0069 
+[epoch 32] step 4/44: loss=0.0067 
+[epoch 32] step 6/44: loss=0.0069 
+[epoch 32] step 8/44: loss=0.0081 
+[epoch 32] step 10/44: loss=0.0076 
+[epoch 32] step 12/44: loss=0.0073 
+[epoch 32] step 14/44: loss=0.0073 
+[epoch 32] step 16/44: loss=0.0073 
+[epoch 32] step 18/44: loss=0.0071 
+[epoch 32] step 20/44: loss=0.0069 
+[epoch 32] step 22/44: loss=0.0069 
+[epoch 32] step 24/44: loss=0.0069 
+[epoch 32] step 26/44: loss=0.0068 
+[epoch 32] step 28/44: loss=0.0070 
+[epoch 32] step 30/44: loss=0.0069 
+[epoch 32] step 32/44: loss=0.0069 
+[epoch 32] step 34/44: loss=0.0069 
+[epoch 32] step 36/44: loss=0.0069 
+[epoch 32] step 38/44: loss=0.0067 
+[epoch 32] step 40/44: loss=0.0067 
+[epoch 32] step 42/44: loss=0.0067 
+[epoch 32] step 44/44: loss=0.0066 
+[epoch 32] val_loss=2.1466 qwk=('0.5971', '0.5924', '0.5256') averageQWK=0.5717 macroEMD=0.1881 tailR0=('0.0935', '0.0556', '0.1250') tailR0avg=0.0913
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    3    1    0
+     0   18   33    4    0
+     0    6   80   39    0
+     0    1   26   86    3
+     0    0    1   20    2
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   19   30    4    0
+     0   10   81   31    0
+     0    1   31  101    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   26   42    1    0
+     0   17  114   21    0
+     0    1   50   51    0
+     0    0    0    2    0
+[epoch 33] step 2/44: loss=0.0064 
+[epoch 33] step 4/44: loss=0.0070 
+[epoch 33] step 6/44: loss=0.0078 
+[epoch 33] step 8/44: loss=0.0077 
+[epoch 33] step 10/44: loss=0.0072 
+[epoch 33] step 12/44: loss=0.0071 
+[epoch 33] step 14/44: loss=0.0066 
+[epoch 33] step 16/44: loss=0.0065 
+[epoch 33] step 18/44: loss=0.0065 
+[epoch 33] step 20/44: loss=0.0064 
+[epoch 33] step 22/44: loss=0.0063 
+[epoch 33] step 24/44: loss=0.0062 
+[epoch 33] step 26/44: loss=0.0062 
+[epoch 33] step 28/44: loss=0.0065 
+[epoch 33] step 30/44: loss=0.0065 
+[epoch 33] step 32/44: loss=0.0064 
+[epoch 33] step 34/44: loss=0.0063 
+[epoch 33] step 36/44: loss=0.0062 
+[epoch 33] step 38/44: loss=0.0062 
+[epoch 33] step 40/44: loss=0.0063 
+[epoch 33] step 42/44: loss=0.0062 
+[epoch 33] step 44/44: loss=0.0062 
+[epoch 33] val_loss=2.1321 qwk=('0.5913', '0.5915', '0.5382') averageQWK=0.5737 macroEMD=0.1861 tailR0=('0.0935', '0.0556', '0.1250') tailR0avg=0.0913
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    4    0    0
+     0   20   31    4    0
+     0    9   81   35    0
+     0    1   34   77    4
+     0    0    2   19    2
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   20   29    4    0
+     0   10   83   29    0
+     0    2   31  100    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   27   41    1    0
+     0   15  114   23    0
+     0    1   48   53    0
+     0    0    0    2    0
+[epoch 34] step 2/44: loss=0.0051 
+[epoch 34] step 4/44: loss=0.0045 
+[epoch 34] step 6/44: loss=0.0048 
+[epoch 34] step 8/44: loss=0.0049 
+[epoch 34] step 10/44: loss=0.0051 
+[epoch 34] step 12/44: loss=0.0049 
+[epoch 34] step 14/44: loss=0.0050 
+[epoch 34] step 16/44: loss=0.0052 
+[epoch 34] step 18/44: loss=0.0051 
+[epoch 34] step 20/44: loss=0.0051 
+[epoch 34] step 22/44: loss=0.0051 
+[epoch 34] step 24/44: loss=0.0051 
+[epoch 34] step 26/44: loss=0.0052 
+[epoch 34] step 28/44: loss=0.0051 
+[epoch 34] step 30/44: loss=0.0054 
+[epoch 34] step 32/44: loss=0.0053 
+[epoch 34] step 34/44: loss=0.0052 
+[epoch 34] step 36/44: loss=0.0053 
+[epoch 34] step 38/44: loss=0.0055 
+[epoch 34] step 40/44: loss=0.0059 
+[epoch 34] step 42/44: loss=0.0058 
+[epoch 34] step 44/44: loss=0.0057 
+[epoch 34] val_loss=2.1443 qwk=('0.5938', '0.5914', '0.5522') averageQWK=0.5792 macroEMD=0.1859 tailR0=('0.1152', '0.0556', '0.1250') tailR0avg=0.0986
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    4    0    0
+     0   20   31    4    0
+     0    7   82   36    0
+     0    1   32   79    4
+     0    0    3   17    3
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   19   30    4    0
+     0   10   82   30    0
+     0    2   29  102    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   29   39    1    0
+     0   15  114   23    0
+     0    1   47   54    0
+     0    0    0    2    0
+[epoch 35] step 2/44: loss=0.0048 
+[epoch 35] step 4/44: loss=0.0039 
+[epoch 35] step 6/44: loss=0.0058 
+[epoch 35] step 8/44: loss=0.0054 
+[epoch 35] step 10/44: loss=0.0055 
+[epoch 35] step 12/44: loss=0.0055 
+[epoch 35] step 14/44: loss=0.0056 
+[epoch 35] step 16/44: loss=0.0056 
+[epoch 35] step 18/44: loss=0.0054 
+[epoch 35] step 20/44: loss=0.0055 
+[epoch 35] step 22/44: loss=0.0054 
+[epoch 35] step 24/44: loss=0.0054 
+[epoch 35] step 26/44: loss=0.0054 
+[epoch 35] step 28/44: loss=0.0054 
+[epoch 35] step 30/44: loss=0.0054 
+[epoch 35] step 32/44: loss=0.0056 
+[epoch 35] step 34/44: loss=0.0056 
+[epoch 35] step 36/44: loss=0.0056 
+[epoch 35] step 38/44: loss=0.0056 
+[epoch 35] step 40/44: loss=0.0056 
+[epoch 35] step 42/44: loss=0.0055 
+[epoch 35] step 44/44: loss=0.0055 
+[epoch 35] val_loss=2.1444 qwk=('0.5903', '0.5916', '0.5441') averageQWK=0.5753 macroEMD=0.1856 tailR0=('0.1152', '0.0556', '0.1250') tailR0avg=0.0986
+[content] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    5    4    0    0
+     0   20   31    4    0
+     0    7   83   35    0
+     0    1   34   77    4
+     0    0    3   17    3
+[organization] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    4    3    1    0
+     0   21   28    4    0
+     0   10   84   28    0
+     0    2   33   98    0
+     0    0    1   11    0
+[language] confusion matrix (rows=true 1..5, cols=pred 1..5):
+     1    1    2    0    0
+     0   29   39    1    0
+     0   16  114   22    0
+     0    1   49   52    0
+     0    0    0    2    0
+[oof] wrote ensembled OOF-val predictions: /workspace/MAGeLDR-KL-loss/results/k6_scorecv/ce/fold4/oof_val_T7.csv
+[VAL] updated /workspace/MAGeLDR-KL-loss/results/k6_scorecv/ce/fold4/metrics.json
+Done.
