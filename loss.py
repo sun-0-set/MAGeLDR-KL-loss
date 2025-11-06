@@ -161,13 +161,9 @@ class JAGeRLoss(nn.Module):
       if conf_gating:
         # Mean ρ setup
         self.def_batch_size = def_batch_size
-        # self.grad_accum = grad_accum
-        # steps_per_epoch is per-forward (micro-batch) since state updates occur every forward.
-        # In DDP, pass steps_per_epoch=len(dl_train) from train.py so all ranks agree.
         self.steps_per_epoch = int(steps_per_epoch) if steps_per_epoch is not None else ceil(self.N / self.def_batch_size)
         self.level_counts = self._level_counts(self.Y, self.H, K)
         if dist.is_available() and dist.is_initialized():
-          # make denominator global to match global accumulators
           self.level_counts = self.level_counts.to(torch.long)
           dist.all_reduce(self.level_counts, op=dist.ReduceOp.SUM)
         self.register_buffer(
@@ -307,12 +303,12 @@ class JAGeRLoss(nn.Module):
       -s + (s2 - cr - t).clamp_min(0).sqrt(),
       s - (s2 - cr + t).clamp_min(0).sqrt(),
       s + (s2 - cr + t).clamp_min(0).sqrt()
-    ], dim=-1) + ρ0.unsqueeze(-1)  # (B,H,4)
+    ], dim=-1) + ρ0.unsqueeze(-1) 
     kurt_quart_roots = kurt_quart_roots.clamp(0, 1)
 
-    log_υ_roots = (kurt_quart_roots.unsqueeze(-1) * Kπ_1.unsqueeze(-2)).log1p() - self.logK  # (B,H,K)
+    log_υ_roots = (kurt_quart_roots.unsqueeze(-1) * Kπ_1.unsqueeze(-2)).log1p() - self.logK  
     ce = self._ce(probs.unsqueeze(-2), log_υ_roots)
-    idx = ce.argmin(dim=-1)  # (B,)
+    idx = ce.argmin(dim=-1)  
     ρ[~msk] = kurt_quart_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)[~msk]
 
     return ρ
@@ -321,9 +317,9 @@ class JAGeRLoss(nn.Module):
   def forward(self, y_pred, ids, update_state: bool = True, global_step: int | None = None):
     # y_pred: (B, H, n_levels)
     λ0, K, H, α, logK = self.λ0, self.K, self.H, self.α, self.logK
-    Y = self.Y[ids]  # (B, H)
+    Y = self.Y[ids]
     B = y_pred.shape[0]
-    λ = self.λ[ids] # (B) / (B, H) if disjoint
+    λ = self.λ[ids]
     
     joint, mixture, reassignment, conf_gating = self.joint, self.mixture, self.reassignment, self.conf_gating
     
@@ -349,14 +345,12 @@ class JAGeRLoss(nn.Module):
       if conf_gating:
         # ρ gated update 
         level_counts_B = self._level_counts(Y, H, K)  # (H,K), local batch counts
-        # old batch contribution using current stored ρ for these ids
         cumul_ρ_B = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
         cumul_ρ_B.scatter_add_(1, Y.T.to(self.cumul_ρ.device), self.ρ[ids].T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
         cumul_ρ = self.cumul_ρ - cumul_ρ_B
         mean_ρ_without_B_full = cumul_ρ / (self.level_counts - level_counts_B + 1)  # (H,K)
         mean_ρ_without_B = mean_ρ_without_B_full.gather(1, Y.T).T  # (B,H)
         assert (mean_ρ_without_B <= 1e0).all(), f"Mean ρ without B has values > 1: {mean_ρ_without_B}, cumul_ρ={cumul_ρ}, level_counts={self.level_counts}, level_counts_B={level_counts_B}"
-        # derive 0-based epoch/step if provided; else default to 0
         t = (global_step // self.steps_per_epoch) if (global_step is not None) else 0
         s_t = (global_step % self.steps_per_epoch) if (global_step is not None) else 0
         τ = s_t * self.def_batch_size / self.N + t
@@ -409,7 +403,6 @@ class JAGeRLoss(nn.Module):
         log_υ_h = (ρ.unsqueeze(-1) * (Kπ_1_label + ρ.unsqueeze(-1) * (Kπ_1_pred_max - Kπ_1_label))).log1p() if reassignment else log_S_h
         if joint:
           joint_log_υ = self._outer_sum(log_υ_h, flat=False)
-          # joint_log_υ[torch.arange(B, device=y_pred.device), *Y.unbind(1)] = 0  # Set thresholds for true labels to zero
           joint_log_υ = joint_log_υ.view(B, -1)
       
       
@@ -450,13 +443,13 @@ class JAGeRLoss(nn.Module):
           c = thresholds - thresholds.mul(_1hot_label)
       
     
-    y_label = y_pred.gather(2, Y.unsqueeze(-1))          # (B,H,1)
+    y_label = y_pred.gather(2, Y.unsqueeze(-1))  
     y_pred = y_pred - y_label 
     if reassignment:
       y_pred = y_pred + ρ.square().unsqueeze(-1) * (y_pred.gather(2, _mode.unsqueeze(-1)) + y_label)
     if joint: 
-      y_pred = self._outer_sum(y_pred, flat=False).view(B, -1)  # (B, K^H)
-    diff_logits = y_pred + c #thresholds
+      y_pred = self._outer_sum(y_pred, flat=False).view(B, -1) 
+    diff_logits = y_pred + c 
     diff_logits_lam_fix = diff_logits /(λt.unsqueeze(1) if joint else λt.unsqueeze(-1))
     if mixture:
       diff_logits_lam_fix = diff_logits_lam_fix + (joint_log_υ if joint else log_υ_h)
@@ -466,24 +459,19 @@ class JAGeRLoss(nn.Module):
     if update_state:
       with torch.no_grad():
         if conf_gating:
-          # 1) old contrib for this batch
           cumul_ρ_B_old = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
           cumul_ρ_B_old.scatter_add_(1, Y.T.to(self.cumul_ρ.device), self.ρ[ids].T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
 
-          # 2) new contrib for this batch
           cumul_ρ_B_new = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
           cumul_ρ_B_new.scatter_add_(1, Y.T.to(self.cumul_ρ.device), ρ.T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
 
-          # 3) delta = new - old (this is what we actually want to apply)
           delta = cumul_ρ_B_new - cumul_ρ_B_old
 
           if dist.is_available() and dist.is_initialized():
-              # everyone contributes their delta, *then* we add once
               dist.all_reduce(delta, op=dist.ReduceOp.SUM)
 
-          # 4) global accumulator stays consistent
           self.cumul_ρ = self.cumul_ρ + delta
-        # per-sample state (local ids)
+        
         if mixture:
           self.ρ[ids] = ρ
           if dist.is_available() and dist.is_initialized():
@@ -509,11 +497,7 @@ class JAGeRLoss(nn.Module):
 
 
 class MultiHeadCELoss(nn.Module):
-  """
-  Average CE across H heads.
-  - y_pred: (B, H, K) logits
-  - Y: global targets tensor (N, H) of int labels
-  """
+
   def __init__(self, Y: torch.Tensor, K: int, label_smoothing: float = 0.0):
     super().__init__()
     self.register_buffer("Y", Y.to(torch.long))
@@ -522,11 +506,9 @@ class MultiHeadCELoss(nn.Module):
     self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
 
   def forward(self, y_pred: torch.Tensor, ids: torch.Tensor, update_state: bool = False) -> torch.Tensor:
-    # y_pred: (B, H, K)
     B, H, K = y_pred.shape
     assert H == self.H and K == self.K, "shape mismatch for CE loss"
-    y = self.Y[ids]  # (B, H)
-    # compute per-head CE and average
+    y = self.Y[ids]
     losses = []
     for h in range(H):
         losses.append(self.ce(y_pred[:, h, :], y[:, h] - 1))

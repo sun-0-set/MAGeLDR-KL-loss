@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── pin working dir to this script ──
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 cd "$SCRIPT_DIR"
 echo "[info] PWD=$PWD"
 
-# ── config ──
 K=6
 GPUS=(0 1 2 3 4 5)
 
-# Point this at whichever split scheme you want
 SPLITS_DIR="$SCRIPT_DIR/splits/k6_scorecv"
 
 TSV="$SCRIPT_DIR/../data/DREsS/DREsS_New_cleaned.tsv"
@@ -44,7 +41,6 @@ JOBS=(
   "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 1"
 )
 
-# ── preflight ──
 echo "[check] SPLITS_DIR=$SPLITS_DIR"
 ls -l "$SPLITS_DIR" || { echo "ERROR: cannot ls $SPLITS_DIR"; exit 1; }
 count=$(ls -1 "$SPLITS_DIR"/fold*.json 2>/dev/null | wc -l | tr -d ' ')
@@ -52,9 +48,8 @@ count=$(ls -1 "$SPLITS_DIR"/fold*.json 2>/dev/null | wc -l | tr -d ' ')
 [[ -f "$TSV" ]] || { echo "ERROR: TSV missing: $TSV"; exit 1; }
 [[ -d "$MODEL" ]] || echo "[note] MODEL dir not found; HF might download."
 
-# ── choose a unique results root based on split scheme ──
-splits_name="$(basename "$SPLITS_DIR")"         # e.g. k6_scorecv
-base_root="$SCRIPT_DIR/results/${splits_name}" # e.g. results/k6_scorecv
+splits_name="$(basename "$SPLITS_DIR")"
+base_root="$SCRIPT_DIR/results/${splits_name}"
 
 RESULTS_ROOT="$base_root"
 run_idx=1
@@ -65,10 +60,9 @@ done
 mkdir -p "$RESULTS_ROOT"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
 
-# ── build task arrays (no delimiters, no IFS tricks) ──
 TASK_LOSS=(); TASK_ARGS=(); TASK_TAG=(); TASK_FOLD=()
 for job in "${JOBS[@]}"; do
-  read -r LOSS ARGS <<<"$job"    # ARGS may be empty
+  read -r LOSS ARGS <<<"$job"
   if [[ -n "$ARGS" ]]; then
     TAG="${LOSS}-$(echo "$ARGS" | tr ' ' '-' | tr -s '-')"
   else
@@ -85,7 +79,6 @@ TOTAL=${#TASK_LOSS[@]}
 SLOTS=${#GPUS[@]}
 echo "[plan] total tasks: $TOTAL ; workers/GPUs: $SLOTS (exactly one per GPU)"
 
-# ── worker: slot index (0..7) runs i=slot, i+=SLOTS ──
 run_worker() {
   local slot="$1"
   local gpu="${GPUS[$slot]}"
@@ -127,14 +120,12 @@ run_worker() {
   done
 }
 
-# ── launch one worker per GPU ──
 pids=()
 for (( s=0; s<SLOTS; s++ )); do
   run_worker "$s" &
   pids+=("$!")
 done
 
-# ── wait for all workers ──
 status=0
 for pid in "${pids[@]}"; do
   wait "$pid" || status=1
