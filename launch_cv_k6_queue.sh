@@ -16,8 +16,8 @@ MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
 EPOCHS=35
 T=7
-BATCH=42
-ACCUM=1
+BATCH=38
+ACCUM=2
 MAXLEN=808
 
 COMMON=(--tsv "$TSV" --model_name "$MODEL" --max_length "$MAXLEN"
