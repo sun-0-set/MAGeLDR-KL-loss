@@ -155,8 +155,8 @@ def evaluate(model, dl, loss_fn, device, args=None):
     amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
 
     tot_loss, n = 0.0, 0
-    all_true = [[], [], []]  # per-head true labels (1..K)
-    all_pred = [[], [], []]  # per-head preds (1..K)
+    all_true = [[], [], []]
+    all_pred = [[], [], []]
     K = 5
     sum_emd_by_class = torch.zeros(3, K, dtype=torch.float64)
     count_by_class   = torch.zeros(3, K, dtype=torch.long)
@@ -167,14 +167,13 @@ def evaluate(model, dl, loss_fn, device, args=None):
             ids = batch["ids"].to(device, non_blocking=pin)
             input_ids = batch["input_ids"].to(device, non_blocking=pin)
             attention_mask = batch["attention_mask"].to(device, non_blocking=pin)
-            labels = batch["labels"]  # CPU (B,3), values 1..K
+            labels = batch["labels"]
 
             with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                 out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-            y_pred = out["logits"].to(torch.float64)  # (B, 3, 5)
+            y_pred = out["logits"].to(torch.float64)
 
-            # don't mutate JAGeR state on validation
             try:
                 loss = loss_fn(y_pred, ids, update_state=False)
             except TypeError:
@@ -184,21 +183,16 @@ def evaluate(model, dl, loss_fn, device, args=None):
             tot_loss += loss.item() * bsz
             n += bsz
 
-            # plain argmax decoding – no prior, no λ scaling
-            pred_idx = y_pred.argmax(-1).cpu()  # (B,3)
+            pred_idx = y_pred.argmax(-1).cpu()
 
-            # --- probabilistic EMD/W1 per-sample (normalized to [0,1]) ---
-            probs  = torch.softmax(y_pred, dim=-1)                         # (B,3,K) on device
-            levels = torch.arange(1, K+1, device=probs.device, dtype=probs.dtype)  # 1..K
-            # absolute distances to the TRUE label (broadcast), normalized by (K-1)
-            abs_dist = (levels.view(1,1,-1) - labels.to(probs).unsqueeze(-1).float()).abs() / (K - 1)  # (B,3,K)
-            emd_batch = (probs * abs_dist).sum(dim=-1).cpu()                # (B,3) on CPU
-            # aggregate per true-class for macro over classes
-            one_hot = torch.nn.functional.one_hot(labels - 1, num_classes=K).to(dtype=torch.long)  # (B,3,K) on CPU
-            sum_emd_by_class += (emd_batch.unsqueeze(-1) * one_hot).sum(dim=0).to(torch.float64)   # (3,K)
+            probs  = torch.softmax(y_pred, dim=-1)
+            levels = torch.arange(1, K+1, device=probs.device, dtype=probs.dtype)
+            abs_dist = (levels.view(1,1,-1) - labels.to(probs).unsqueeze(-1).float()).abs() / (K - 1)
+            emd_batch = (probs * abs_dist).sum(dim=-1).cpu()
+            one_hot = torch.nn.functional.one_hot(labels - 1, num_classes=K).to(dtype=torch.long)  
+            sum_emd_by_class += (emd_batch.unsqueeze(-1) * one_hot).sum(dim=0).to(torch.float64)   
             count_by_class   += one_hot.sum(dim=0)
 
-            # collect for CM/QWK/MAE
             for h in range(3):
                 all_true[h].extend(labels[:, h].tolist())
                 all_pred[h].extend((pred_idx[:, h] + 1).tolist())
@@ -247,12 +241,7 @@ def evaluate(model, dl, loss_fn, device, args=None):
 
 @torch.no_grad()
 def predict_probs_on_loader(model, dl, device):
-    """
-    Run forward pass on 'dl' and return:
-      ids  : (N,) dataset indices
-      y    : dict head_name->(N,) int labels (1..K)
-      probs: dict head_name->(N,C) float probabilities
-    """
+
     model.eval()
     all_ids = []
     y_lists = {"content": [], "organization": [], "language": []}
@@ -282,18 +271,12 @@ def predict_probs_on_loader(model, dl, device):
     return ids, y, p
 
 def joint_stratified_indices(ds, val_frac: float, seed: int, min_count: int = 2):
-    """
-    Returns train_idx, val_idx using *joint* stratification over (content, organization, language).
-    Graceful fallback to (content, organization) then (content) then random if some strata are too small.
-    Assumes labels in ds.df[TARGET_COLS] are 1..K.
-    """
     K = 5
     y = ds.df[TARGET_COLS].to_numpy(copy=False)  # shape (N,3), values 1..K
     N = y.shape[0]
     idx = np.arange(N)
 
     def try_split(strata):
-        # Ensure every class has at least 2 samples for stratify
         _, counts = np.unique(strata, return_counts=True)
         if (counts < min_count).any():
             return None
@@ -301,30 +284,29 @@ def joint_stratified_indices(ds, val_frac: float, seed: int, min_count: int = 2)
             idx, test_size=val_frac, random_state=seed, stratify=strata
         )
 
-    # 3D joint: (c-1)*K^2 + (o-1)*K + (l-1)
+
     joint_3 = (y[:,0]-1)*K*K + (y[:,1]-1)*K + (y[:,2]-1)
     out = try_split(joint_3)
     if out is not None:
         return out
 
-    # 2D fallback: (c-1)*K + (o-1)
+
     joint_2 = (y[:,0]-1)*K + (y[:,1]-1)
     out = try_split(joint_2)
     if out is not None:
         return out
 
-    # 1D fallback: content only
+
     out = try_split(y[:,0]-1)
     if out is not None:
         return out
 
-    # Final fallback: random split
+
     train_idx, val_idx = train_test_split(idx, test_size=val_frac, random_state=seed, shuffle=True, stratify=None)
     return train_idx, val_idx
 
 
 def _maybe_init_wandb(args):
-    """Initialize W&B if requested and available. Returns a run or None."""
     if not getattr(args, "wandb", False) or args.wandb_mode == "disabled":
         return None
     if not _WANDB_OK:
@@ -345,10 +327,7 @@ def _maybe_init_wandb(args):
 
 
 def _log_cms_as_wandb_images(cms, split: str, head_names=("content", "organization", "language"), step: int | None = None):
-    """
-    Render a list[3] of confusion matrices as small heatmaps and log to W&B.
-    Safe no-op if W&B is unavailable.
-    """
+
     if wandb is None or wandb.run is None:
         return
     import matplotlib.pyplot as plt
@@ -402,16 +381,13 @@ def main():
              else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.set_num_threads(max(1, os.cpu_count() or 1))
     if device.type == "cuda":
-        # A100: enable TF32; bf16 autocast below
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
     # Build dataset 
     tok_path = os.path.join(args.model_name, "tokenizer.json")
     if os.path.isdir(args.model_name) and os.path.exists(tok_path):
-        # Bypass AutoTokenizer entirely > no warning
         tok = PreTrainedTokenizerFast(tokenizer_file=tok_path)
-        # Merge special tokens map manually (pad/cls/sep/etc.)
         spec_path = os.path.join(args.model_name, "special_tokens_map.json")
         added = 0
         if os.path.exists(spec_path):
@@ -437,9 +413,7 @@ def main():
         )
     if is_main_process(): print(f"[tok] class={tok.__class__.__name__} fast={getattr(tok,'is_fast',None)} src={'tokenizer.json' if os.path.exists(tok_path) else args.model_name}")
 
-    # Build dataset
     ds = DRESSDataset(args.tsv, tokenizer_name=args.model_name, max_length=args.max_length, tokenizer=tok)
-    # Use frozen split if present
     if args.split_file and os.path.exists(args.split_file):
         import json
         with open(args.split_file) as f: split = json.load(f)
@@ -448,7 +422,6 @@ def main():
         ds_val   = Subset(ds, val_ids)
         ds_test  = Subset(ds, test_ids)
     else:
-        # fallback: build joint-stratified split over (content, organization, language)
         if int(args.stratify_joint) == 1:
             tr_idx, va_idx = joint_stratified_indices(ds, val_frac=args.val_frac, seed=args.seed)
             ds_train = Subset(ds, tr_idx)
@@ -457,27 +430,21 @@ def main():
             val_ids   = list(map(int, va_idx))
         else:
             ds_train, ds_val = ds.random_split(val_frac=args.val_frac, seed=args.seed)
-            # random_split returns Subsets; grab their indices
             train_ids = list(map(int, getattr(ds_train, "indices", range(len(ds_train)))))
             val_ids   = list(map(int, getattr(ds_val,   "indices", range(len(ds_val)))))
         ds_test = None
 
     eval_test_flag = bool(args.eval_test and ds_test is not None)
 
-    # Optional subsetting for faster local iterations
     if args.limit_train and args.limit_train < len(ds_train):
         ds_train = Subset(ds_train, list(range(args.limit_train)))
     if args.limit_val and args.limit_val < len(ds_val):
         ds_val = Subset(ds_val, list(range(args.limit_val)))
 
-    # (ds already has `tok`; keep a no-op assignment for clarity)
     if hasattr(ds, "tokenizer"): ds.tokenizer = tok
 
-    # Dynamic padding collator (pads each batch to the batch max)
     collate = DataCollatorWithPadding(tokenizer=tok, pad_to_multiple_of=(args.pad_to_multiple_of if args.pad_to_multiple_of > 0 else None))
-    # safety: ensure pad token is set (should already be via special_tokens_map)
     if tok.pad_token is None:
-        # prefer BERT-like sep as pad, else fall back to adding a PAD token
         if tok.sep_token is not None:
             tok.pad_token = tok.sep_token
         elif tok.eos_token is not None:
@@ -488,7 +455,6 @@ def main():
     # ---- Samplers (DDP) ----
     train_sampler = None
     if is_dist():
-        # DistributedSampler handles shuffling
         from torch.utils.data.distributed import DistributedSampler
         train_sampler = DistributedSampler(ds_train, shuffle=True, drop_last=False)
 
@@ -514,7 +480,7 @@ def main():
         counts = np.zeros((3, K), dtype=np.int64)
         total = np.zeros(3, dtype=np.int64)
         for batch in dl:
-            lab = batch["labels"].cpu().numpy()  # (B,3), values 1..K
+            lab = batch["labels"].cpu().numpy()
             for h in range(3):
                 vh = lab[:, h]
                 total[h] += vh.size
@@ -552,7 +518,7 @@ def main():
     except Exception:
         pass
 
-    # Print gradient checkpointing status (safe on DDP/non-DDP)
+    # Print gradient checkpointing status
     def unwrap(m): return m.module if hasattr(m, "module") else m
     if is_main_process():
         base = unwrap(model)
@@ -569,7 +535,7 @@ def main():
             model, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
         )
     
-    # Optional head-only warmup
+    # Head-only warmup
     if args.freeze_encoder:
         enc = model.module.encoder if is_dist() else model.encoder
         for p in enc.parameters():
@@ -578,7 +544,7 @@ def main():
             print(">> Encoder frozen (training heads only).")
         
 
-    # Stateful loss (init ONCE with full Y)
+    # Stateful loss
     Y_all = ds.get_all_targets_tensor().to(device)
     if args.loss == "jager":
         loss_fn = JAGeRLoss(
@@ -594,7 +560,7 @@ def main():
             C=args.C,
             log_to_wandb=bool(getattr(args, "wandb", False)),
             def_batch_size=args.batch_size,
-            steps_per_epoch=len(dl_train)  # per-rank micro-batch steps/epoch (DDP-safe)
+            steps_per_epoch=len(dl_train)
         ).to(device)
     else:
         loss_fn = MultiHeadCELoss(Y=Y_all, K=5, label_smoothing=args.ce_label_smoothing).to(device)
@@ -608,11 +574,9 @@ def main():
         **({"test": test_ids} if eval_test_flag else {}),
         "all":   idx_all,
     }
-    # Pick up buffers from the loss object (not all losses expose these)
     λ = getattr(loss_fn, "λ", None)
     ρ = getattr(loss_fn, "ρ", None)
     static_stats = {}
-    # λ and ρ stats: treat as per-head if tensor rank ≥ 2
     for view_name, idx in views.items():
         if not idx:
             continue
@@ -624,7 +588,6 @@ def main():
             per_head = ρ.dim() >= 2
             static_stats[prefix + "rho"] = _gather_stats_from_buffer(ρ, idx, per_head=per_head)
     if is_main_process() and run_wandb is not None:
-        # flatten for W&B
         flat = {}
         for k, v in static_stats.items():
             if isinstance(v, dict) and isinstance(v.get("mean"), list):
@@ -645,7 +608,6 @@ def main():
         ckpt = torch.load(best_path, map_location="cpu")
         (model.module if is_dist() else model).load_state_dict(ckpt["model"])
 
-        # Build test loader if we have a split
         test_loader = None
         if ds_test is not None:
             test_loader = DataLoader(
@@ -654,7 +616,6 @@ def main():
                 pin_memory=pin, collate_fn=collate, prefetch_factor=_pf
             )
 
-        # Evaluate (read-only)
         val_loss, vcms, vqwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
             model.module if is_dist() else model,
             dl_val, loss_fn, device, args=args
@@ -704,7 +665,6 @@ def main():
     warmup = max(1, int(0.1 * total_steps))
     sched = get_linear_schedule_with_warmup(optim, warmup, total_steps)
 
-    # AMP dtype: prefer bf16 on A100
     use_amp   = (device.type == "cuda")
     amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
     scaler = None
@@ -714,14 +674,12 @@ def main():
     best_qwk = float("-inf")
     improved = False
     global_step = 0
-    # Buffer of per-epoch VAL predictions for OOF ensembling
     val_pred_epochs = []  # list of {"epoch": int, "ids": np.ndarray, "y": dict, "p": dict}
 
     for epoch in range(1, args.epochs+1):
-        # Ensure different shuffles across epochs in DDP
         if is_dist() and train_sampler is not None:
             train_sampler.set_epoch(epoch)
-        # Optional unfreeze at a chosen epoch (for GPU runs)
+        # Unfreeze at a chosen epoch (for GPU runs)
         if args.unfreeze_at_epoch == epoch:
             enc = model.module.encoder if is_dist() else model.encoder
             for p in enc.parameters():
@@ -786,7 +744,7 @@ def main():
                     global_step += 1
 
 
-        # finish partial accumulation only if we didn't just step above
+        # finish partial accumulation
         if (step_in_accum % args.grad_accum) != 0:
             if scaler is not None and scaler.is_enabled():
                 scaler.unscale_(optim)
@@ -798,7 +756,6 @@ def main():
             optim.zero_grad(set_to_none=True); sched.step()
 
         # Monitor λ range
-        train_loss_avg = running / max(1, math.ceil(len(dl_train)/args.grad_accum))
         if hasattr(loss_fn, "λ") and isinstance(getattr(loss_fn, "λ", None), torch.Tensor):
             with torch.no_grad():
                 λ = loss_fn.λ
@@ -1071,7 +1028,6 @@ def main():
         S = max(1, int(getattr(args, "ens_stride", 1)))
         keep = [rec for rec in val_pred_epochs[-T:]][::S]
         base_ids = keep[0]["ids"]
-        # sanity: ids must match across kept epochs (val loader is deterministic)
         for rec in keep[1:]:
             if not np.array_equal(base_ids, rec["ids"]):
                 raise RuntimeError("Validation ids changed across epochs; cannot ensemble. Check val shuffle.")
@@ -1082,7 +1038,6 @@ def main():
             avg_p[h] = stack.mean(axis=0)                            # (N, C)
         y_true = keep[0]["y"]
         ids    = base_ids
-        # write OOF VAL CSV with expected score, argmax, and per-class probs per head
         rows = []
         fold_name = os.path.basename(os.path.abspath(args.save_dir))
         for i in range(len(ids)):
@@ -1097,7 +1052,6 @@ def main():
                 row[f"{h}_y"]   = yt
                 row[f"{h}_exp"] = exp
                 row[f"{h}_pred"]= pred
-                # 1-based class labels (p1..pK) for readability
                 for k in range(C):
                     row[f"{h}_p{k+1}"] = float(p[k])
             rows.append(row)
@@ -1109,7 +1063,7 @@ def main():
             for r in rows: w.writerow(r)
         print(f"[oof] wrote ensembled OOF-val predictions: {oof_path}")
 
-    # --- Always ensure VAL is present in metrics.json (inner CV needs this) ---
+
     if is_main_process() and dl_val is not None:
         try:
             v_loss, v_cms, v_qwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(

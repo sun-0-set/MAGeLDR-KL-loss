@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 TARGET_COLS = ["content", "organization", "language"]
 
 class DRESSDataset(Dataset):
-    def __init__(self, tsv_path: str, tokenizer_name: str = "tasksource/deberta-small-long-nli",
+    def __init__(self, tsv_path: str, tokenizer_name: str = "microsoft/deberta-v3-large",
                  max_length: int = 1600, tokenizer=None):
         self.df = pd.read_csv(tsv_path, sep="\t").dropna(subset=["prompt", "essay"] + TARGET_COLS).reset_index(drop=True)
         self.df["row_id"] = self.df.index.astype(int)

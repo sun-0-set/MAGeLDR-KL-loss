@@ -77,7 +77,7 @@ for job in "${JOBS[@]}"; do
 done
 TOTAL=${#TASK_LOSS[@]}
 SLOTS=${#GPUS[@]}
-echo "[plan] total tasks: $TOTAL ; workers/GPUs: $SLOTS (exactly one per GPU)"
+echo "[plan] total tasks: $TOTAL"
 
 run_worker() {
   local slot="$1"
@@ -100,7 +100,6 @@ run_worker() {
       set +e
       ARGS_ARR=()
       if [[ -n "$ARGS" ]]; then
-        # split flags into array
         read -r -a ARGS_ARR <<<"$ARGS"
       fi
       CUDA_VISIBLE_DEVICES="$gpu" \
@@ -115,7 +114,6 @@ run_worker() {
     code=$(cat "$SAVE/.exit_code" 2>/dev/null || echo 1)
     if [[ "$code" != "0" ]]; then
       echo "!! [GPU $gpu] ${TAG} fold${FOLD} FAILED (code $code). See $LOG"
-      # keep going; we’ll summarize failures at the end
     fi
   done
 }
