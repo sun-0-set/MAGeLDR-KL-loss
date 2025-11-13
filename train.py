@@ -1,4 +1,3 @@
-# train.py
 import math, os, random, argparse, csv, json
 import contextlib
 import torch
@@ -17,7 +16,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, cohen_kappa_score, recall_score
 import numpy as np
 from modeling_multitask import MultiHeadDeberta
-from data_utils import DRESSDataset, TARGET_COLS
+from data_utils import EssayDataset
 from loss import JAGeRLoss, MultiHeadCELoss
 
 try:
@@ -29,7 +28,6 @@ except Exception:
     
 
 def _gather_stats_from_buffer(buf: "torch.Tensor", idx: list[int], per_head: bool):
-    import torch
     x = buf.detach()
     if x.is_cuda:
         x = x.cpu()
@@ -71,25 +69,33 @@ def parse_args():
     p = argparse.ArgumentParser()
 
     # --- Data / general -------------------------------------------------
-    p.add_argument("--tsv", default="../data/DREsS/DREsS_New_cleaned.tsv")
-    p.add_argument("--split_file", type=str, default="splits/dress_seed42.json",
-                   help="JSON with {train,val,test} id lists; if missing, do random split")
+    p.add_argument(
+        "--data_path", "--tsv",
+        dest="data_path",
+        default="../data/DREsS/DREsS_New_cleaned.tsv",
+        help="Path to CSV/TSV with columns ['prompt','essay', <label1>, <label2>, ...].",
+    )
+    p.add_argument(
+        "--split_file", type=str, default="splits/dress_seed42.json",
+        help="JSON with {train,val,test} id lists; ids are row indices into the data file."
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save_dir", default="checkpoints")
-    # --- OOF ensembling over final epochs ---
-    p.add_argument("--ens_t", type=int, default=10,
-                   help="Number of final epochs to average validation probabilities over (T).")
-    p.add_argument("--ens_stride", type=int, default=1,
-                   help="Stride when selecting the last-T epochs to average (e.g., 2 averages every 2nd epoch).")
-
-    p.add_argument("--val_frac", type=float, default=0.1)
-    p.add_argument("--stratify_joint", type=int, default=1,
-                   help="Use joint stratification over (content, organization, language) if no --split_file.")
+    p.add_argument("--ens_t", type=int, default=10)
+    p.add_argument("--ens_stride", type=int, default=1)
+    p.add_argument("--val_frac", type=float, default=0.1,
+                   help="If no --split_file, fraction used for validation.")
     p.add_argument("--limit_train", type=int, default=0, help="use only N training examples (0=all)")
     p.add_argument("--limit_val", type=int, default=0, help="use only N validation examples (0=all)")
 
+    # --- Label support (ordinal) ---------------------------------------
+    p.add_argument("--level_offset", type=int, default=1,
+                   help="Lowest ordinal label value (inclusive).")
+    p.add_argument("--max_level", type=int, default=None,
+                   help="Highest ordinal label value (inclusive). If not set, inferred from data.")
+
     # --- Model / Tokenizer ---------------------------------------------
-    p.add_argument("--model_name", default="tasksource/deberta-small-long-nli")
+    p.add_argument("--model_name", default="microsoft/deberta-v3-large")
     p.add_argument("--hf_offline", action="store_true",
                    help="Force offline mode and local files only for HF")
     p.add_argument("--use_fast_tokenizer", type=int, default=1,
@@ -150,16 +156,23 @@ def parse_args():
 
 
 def evaluate(model, dl, loss_fn, device, args=None):
+    assert args is not None, "evaluate requires args with num_heads/K/level_offset/target_cols/minority_classes"
+    assert hasattr(args, "num_heads") and hasattr(args, "K") and hasattr(args, "level_offset")
+    assert hasattr(args, "target_cols") and hasattr(args, "minority_classes")
+
     model.eval()
     use_amp = (device.type == "cuda")
     amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
 
+    num_heads = int(args.num_heads)
+    K = int(args.K)
+    level_offset = int(args.level_offset)
+
     tot_loss, n = 0.0, 0
-    all_true = [[], [], []]
-    all_pred = [[], [], []]
-    K = 5
-    sum_emd_by_class = torch.zeros(3, K, dtype=torch.float64)
-    count_by_class   = torch.zeros(3, K, dtype=torch.long)
+    all_true = [[] for _ in range(num_heads)]
+    all_pred = [[] for _ in range(num_heads)]
+    sum_emd_by_class = torch.zeros(num_heads, K, dtype=torch.float64)
+    count_by_class   = torch.zeros(num_heads, K, dtype=torch.long)
 
     with torch.inference_mode():
         for batch in dl:
@@ -172,7 +185,7 @@ def evaluate(model, dl, loss_fn, device, args=None):
             with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                 out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-            y_pred = out["logits"].to(torch.float64)
+            y_pred = (out["logits"] if isinstance(out, dict) and "logits" in out else out).to(torch.float64)
 
             try:
                 loss = loss_fn(y_pred, ids, update_state=False)
@@ -184,50 +197,43 @@ def evaluate(model, dl, loss_fn, device, args=None):
             n += bsz
 
             pred_idx = y_pred.argmax(-1).cpu()
+            probs = torch.softmax(y_pred, dim=-1)
 
-            probs  = torch.softmax(y_pred, dim=-1)
-            levels = torch.arange(1, K+1, device=probs.device, dtype=probs.dtype)
-            abs_dist = (levels.view(1,1,-1) - labels.to(probs).unsqueeze(-1).float()).abs() / (K - 1)
+            levels = torch.arange(level_offset, level_offset + K, device=probs.device, dtype=probs.dtype)
+            abs_dist = (levels.view(1, 1, -1) - labels.to(probs).unsqueeze(-1).float()).abs() / max(K - 1, 1)
             emd_batch = (probs * abs_dist).sum(dim=-1).cpu()
-            one_hot = torch.nn.functional.one_hot(labels - 1, num_classes=K).to(dtype=torch.long)  
-            sum_emd_by_class += (emd_batch.unsqueeze(-1) * one_hot).sum(dim=0).to(torch.float64)   
+
+            idx = (labels - level_offset).clamp(0, K - 1)
+            one_hot = torch.nn.functional.one_hot(idx, num_classes=K).to(dtype=torch.long)
+            sum_emd_by_class += (emd_batch.unsqueeze(-1) * one_hot).sum(dim=0).to(torch.float64)
             count_by_class   += one_hot.sum(dim=0)
 
-            for h in range(3):
+            for h in range(num_heads):
                 all_true[h].extend(labels[:, h].tolist())
-                all_pred[h].extend((pred_idx[:, h] + 1).tolist())
+                all_pred[h].extend((pred_idx[:, h] + level_offset).tolist())
 
-    # ---- Confusion matrices + QWK + EMD ----
     cms, qwks, emds, tail_recalls = [], [], [], []
-    label_list = list(range(1, K + 1))
-    for h in range(3):
+    label_list = list(range(level_offset, level_offset + K))
+    for h in range(num_heads):
         y_t = np.array(all_true[h], dtype=int)
         y_p = np.array(all_pred[h], dtype=int)
 
         cms.append(confusion_matrix(y_t, y_p, labels=label_list))
         qwks.append(float(cohen_kappa_score(y_t, y_p, weights="quadratic")))
 
-        # per-class EMD averages (ignore empty classes via nan)
         sums   = sum_emd_by_class[h].numpy()
         counts = count_by_class[h].numpy()
         with np.errstate(invalid="ignore", divide="ignore"):
             per_class_emd = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
         emds.append(float(np.nanmean(per_class_emd)))
 
-        # ---- Tail Recall@0 (strict exact-match), macro over minority classes ----
-        if args is not None and hasattr(args, "minority_classes") and args.minority_classes and len(args.minority_classes) == 3:
-            minority = list(args.minority_classes[h])
-        else:
-            # fallback: pick 2 least frequent classes in this split
-            counts_h = np.bincount(np.clip(y_t, 1, K), minlength=K+1)[1:]
-            minority = list(np.argsort(counts_h)[:2] + 1)  # to 1..K
-        # per-class recall (exact match); zero_division=0 handles empty support gracefully
+        minority = list(args.minority_classes[h])  # must be present
         per_class_rec = recall_score(y_t, y_p, labels=label_list, average=None, zero_division=0)
-        mr = [per_class_rec[c-1] for c in minority if 1 <= c <= K]
-        tail_recalls.append(float(np.mean(mr)) if len(mr) else float("nan"))
+        mr = [per_class_rec[c - level_offset] for c in minority]
+        tail_recalls.append(float(np.mean(mr)) if mr else float("nan"))
 
-    macro_emd = float(sum(emds) / len(emds))  # mean over 3 heads
-    tail_recall_avg = float(sum(tail_recalls) / len(tail_recalls)) if len(tail_recalls) else float("nan")
+    macro_emd = float(sum(emds) / len(emds)) if emds else float("nan")
+    tail_recall_avg = float(sum(tail_recalls) / len(tail_recalls)) if tail_recalls else float("nan")
 
     return (
         tot_loss / max(n, 1),
@@ -239,71 +245,61 @@ def evaluate(model, dl, loss_fn, device, args=None):
         tail_recall_avg
     )
 
+def _get_head_names_from_loader(dl):
+    ds = dl.dataset
+    while hasattr(ds, "dataset"):  # unwrap Subset chains
+        ds = ds.dataset
+    if hasattr(ds, "target_cols"):
+        return list(ds.target_cols)
+    if hasattr(ds, "label_cols"):
+        return list(ds.label_cols)
+    sample = ds[0]
+    if isinstance(sample, dict) and "labels" in sample:
+        H = int(sample["labels"].shape[-1])
+        return [f"head{h}" for h in range(H)]
+    return []
+
+
 @torch.no_grad()
 def predict_probs_on_loader(model, dl, device):
-
     model.eval()
+    head_names = _get_head_names_from_loader(dl)
+
     all_ids = []
-    y_lists = {"content": [], "organization": [], "language": []}
-    p_lists = {"content": [], "organization": [], "language": []}
+    y_lists = None
+    p_lists = None
+
     for batch in dl:
         ids = batch["ids"].detach().cpu()
+        labels = batch["labels"]
+
+        if y_lists is None:
+            H = labels.shape[1]
+            if not head_names:
+                head_names = [f"head{h}" for h in range(H)]
+            y_lists = {name: [] for name in head_names}
+            p_lists = {name: [] for name in head_names}
+
         all_ids.append(ids)
-        labels = batch["labels"]  # tensor (B,3) with values 1..K
-        for h, name in enumerate(("content", "organization", "language")):
+        for h, name in enumerate(head_names):
             y_lists[name].append(labels[:, h].detach().cpu())
+
         x = {
             k: v.to(device, non_blocking=True)
             for k, v in batch.items()
             if k in ("input_ids", "attention_mask", "token_type_ids") and isinstance(v, torch.Tensor)
         }
         out = model(**x)
-        if isinstance(out, dict) and "logits" in out:
-            logits = out["logits"]             # (B,3,C)
-        else:
-            logits = out                       # fallback
-        probs = torch.softmax(logits.float(), dim=-1).detach().cpu()  # (B,3,C)
-        for h, name in enumerate(("content", "organization", "language")):
+        logits = out["logits"] if isinstance(out, dict) and "logits" in out else out
+        probs = torch.softmax(logits.float(), dim=-1).detach().cpu()
+
+        for h, name in enumerate(head_names):
             p_lists[name].append(probs[:, h, :])
+
     ids = torch.cat(all_ids, dim=0).numpy()
-    y = {k: torch.cat(v, dim=0).numpy() for k, v in y_lists.items()}
-    p = {k: torch.cat(v, dim=0).numpy() for k, v in p_lists.items()}
+    y = {k: torch.cat(v, dim=0).numpy() for k, v in (y_lists or {}).items()}
+    p = {k: torch.cat(v, dim=0).numpy() for k, v in (p_lists or {}).items()}
     return ids, y, p
-
-def joint_stratified_indices(ds, val_frac: float, seed: int, min_count: int = 2):
-    K = 5
-    y = ds.df[TARGET_COLS].to_numpy(copy=False)  # shape (N,3), values 1..K
-    N = y.shape[0]
-    idx = np.arange(N)
-
-    def try_split(strata):
-        _, counts = np.unique(strata, return_counts=True)
-        if (counts < min_count).any():
-            return None
-        return train_test_split(
-            idx, test_size=val_frac, random_state=seed, stratify=strata
-        )
-
-
-    joint_3 = (y[:,0]-1)*K*K + (y[:,1]-1)*K + (y[:,2]-1)
-    out = try_split(joint_3)
-    if out is not None:
-        return out
-
-
-    joint_2 = (y[:,0]-1)*K + (y[:,1]-1)
-    out = try_split(joint_2)
-    if out is not None:
-        return out
-
-
-    out = try_split(y[:,0]-1)
-    if out is not None:
-        return out
-
-
-    train_idx, val_idx = train_test_split(idx, test_size=val_frac, random_state=seed, shuffle=True, stratify=None)
-    return train_idx, val_idx
 
 
 def _maybe_init_wandb(args):
@@ -326,16 +322,21 @@ def _maybe_init_wandb(args):
     return run
 
 
-def _log_cms_as_wandb_images(cms, split: str, head_names=("content", "organization", "language"), step: int | None = None):
-
+def _log_cms_as_wandb_images(cms, split: str, head_names, level_offset: int, step: int | None = None):
+        
     if wandb is None or wandb.run is None:
         return
     import matplotlib.pyplot as plt
     if not cms:
         return
+    if head_names is None:
+        head_names = [f"head{h}" for h in range(len(cms))]
     K = int(np.asarray(cms[0]).shape[0])
+    tick_labels = list(range(level_offset, level_offset + K))
     vmax = max(int(np.asarray(cm).max()) for cm in cms)
     for h, name in enumerate(head_names):
+        if h >= len(cms):
+            break
         cm = np.asarray(cms[h], dtype=np.int32)
         fig = plt.figure(figsize=(3.2, 3.2), dpi=150)
         ax = fig.add_subplot(111)
@@ -343,7 +344,7 @@ def _log_cms_as_wandb_images(cms, split: str, head_names=("content", "organizati
         ax.set_title(f"{split.upper()} CM – {name}")
         ax.set_xlabel("Predicted"); ax.set_ylabel("True")
         ax.set_xticks(range(K)); ax.set_yticks(range(K))
-        ax.set_xticklabels(list(range(1, K+1))); ax.set_yticklabels(list(range(1, K+1)))
+        ax.set_xticklabels(tick_labels); ax.set_yticklabels(tick_labels)
         for i in range(K):
             for j in range(K):
                 ax.text(j, i, int(cm[i, j]), ha="center", va="center", fontsize=8)
@@ -391,19 +392,11 @@ def main():
         spec_path = os.path.join(args.model_name, "special_tokens_map.json")
         added = 0
         if os.path.exists(spec_path):
-            import json as _json
             with open(spec_path) as _f:
-                spec = _json.load(_f)
+                spec = json.load(_f)
             to_add = {k: v for k, v in spec.items() if isinstance(v, str)}
             if to_add:
                 added = tok.add_special_tokens(to_add)
-        if tok.pad_token is None:
-            if tok.sep_token is not None:
-                tok.pad_token = tok.sep_token
-            elif tok.eos_token is not None:
-                tok.pad_token = tok.eos_token
-            else:
-                added += tok.add_special_tokens({'pad_token': '[PAD]'})
     else:
         tok = AutoTokenizer.from_pretrained(
             args.model_name,
@@ -411,37 +404,69 @@ def main():
             local_files_only=bool(args.hf_offline),
             trust_remote_code=False,
         )
-    if is_main_process(): print(f"[tok] class={tok.__class__.__name__} fast={getattr(tok,'is_fast',None)} src={'tokenizer.json' if os.path.exists(tok_path) else args.model_name}")
+    if is_main_process():
+        print(
+            f"[tok] class={tok.__class__.__name__} fast={getattr(tok, 'is_fast', None)} "
+            f"src={'tokenizer.json' if os.path.exists(tok_path) else args.model_name}"
+        )
+    # ---- Generic dataset + splits ----
+    ds = EssayDataset(
+        path=args.data_path,
+        tokenizer_name=args.model_name,
+        max_length=args.max_length,
+        tokenizer=tok,
+    )
+    target_cols = ds.target_cols
+    num_heads = len(target_cols)
+    Y_all_cpu = ds.get_all_targets_tensor()
 
-    ds = DRESSDataset(args.tsv, tokenizer_name=args.model_name, max_length=args.max_length, tokenizer=tok)
     if args.split_file and os.path.exists(args.split_file):
-        import json
-        with open(args.split_file) as f: split = json.load(f)
-        train_ids = split["train"]; val_ids = split["val"]; test_ids = split["test"]
+        with open(args.split_file) as f:
+            split = json.load(f)
+        train_ids = [int(i) for i in split["train"]]
+        val_ids   = [int(i) for i in split["val"]]
+        test_ids  = [int(i) for i in split.get("test", [])]
         ds_train = Subset(ds, train_ids)
         ds_val   = Subset(ds, val_ids)
-        ds_test  = Subset(ds, test_ids)
+        ds_test  = Subset(ds, test_ids) if test_ids else None
     else:
-        if int(args.stratify_joint) == 1:
-            tr_idx, va_idx = joint_stratified_indices(ds, val_frac=args.val_frac, seed=args.seed)
-            ds_train = Subset(ds, tr_idx)
-            ds_val   = Subset(ds, va_idx)
-            train_ids = list(map(int, tr_idx))
-            val_ids   = list(map(int, va_idx))
-        else:
-            ds_train, ds_val = ds.random_split(val_frac=args.val_frac, seed=args.seed)
-            train_ids = list(map(int, getattr(ds_train, "indices", range(len(ds_train)))))
-            val_ids   = list(map(int, getattr(ds_val,   "indices", range(len(ds_val)))))
-        ds_test = None
+        idx_all = np.arange(len(ds))
+        tr_idx, va_idx = train_test_split(
+            idx_all,
+            test_size=args.val_frac,
+            random_state=args.seed,
+            shuffle=True,
+            stratify=None,
+        )
+        train_ids = [int(i) for i in tr_idx]
+        val_ids   = [int(i) for i in va_idx]
+        ds_train = Subset(ds, train_ids)
+        ds_val   = Subset(ds, val_ids)
+        ds_test  = None
 
-    eval_test_flag = bool(args.eval_test and ds_test is not None)
+    level_offset = int(args.level_offset)
+    if args.max_level is not None:
+        max_level = int(args.max_level)
+    else:
+        max_level = int(Y_all_cpu.max().item())
+    if max_level < level_offset:
+        raise ValueError(f"max_level ({max_level}) must be >= level_offset ({level_offset}).")
+    if ((Y_all_cpu < level_offset) | (Y_all_cpu > max_level)).any():
+        y_min = int(Y_all_cpu.min().item()); y_max = int(Y_all_cpu.max().item())
+        raise ValueError(
+            f"Label values outside declared support [{level_offset}, {max_level}]: min={y_min}, max={y_max}."
+        )
+    K = max_level - level_offset + 1
+    args.target_cols = target_cols
+    args.num_heads = num_heads
+    args.level_offset = level_offset
+    args.max_level = max_level
+    args.K = K
 
     if args.limit_train and args.limit_train < len(ds_train):
         ds_train = Subset(ds_train, list(range(args.limit_train)))
     if args.limit_val and args.limit_val < len(ds_val):
         ds_val = Subset(ds_val, list(range(args.limit_val)))
-
-    if hasattr(ds, "tokenizer"): ds.tokenizer = tok
 
     collate = DataCollatorWithPadding(tokenizer=tok, pad_to_multiple_of=(args.pad_to_multiple_of if args.pad_to_multiple_of > 0 else None))
     if tok.pad_token is None:
@@ -450,7 +475,12 @@ def main():
         elif tok.eos_token is not None:
             tok.pad_token = tok.eos_token
         else:
-            tok.add_special_tokens({'pad_token': '[PAD]'})
+            # track newly added pad token so embeddings can be resized once
+            n_added = tok.add_special_tokens({'pad_token': '[PAD]'})
+            if 'added' in locals():
+                added += n_added
+            else:
+                added = n_added
 
     # ---- Samplers (DDP) ----
     train_sampler = None
@@ -476,34 +506,37 @@ def main():
     )
 
     # ---- Determine minority classes from TRAIN distribution (per head) ----
-    def _compute_minority_classes(dl, K=5, threshold=0.10, bottom_m=2):
-        counts = np.zeros((3, K), dtype=np.int64)
-        total = np.zeros(3, dtype=np.int64)
+    def _compute_minority_classes(dl, K, num_heads, level_offset, threshold=0.10, bottom_m=2):
+        counts = np.zeros((num_heads, K), dtype=np.int64)
+        total = np.zeros(num_heads, dtype=np.int64)
         for batch in dl:
             lab = batch["labels"].cpu().numpy()
-            for h in range(3):
-                vh = lab[:, h]
-                total[h] += vh.size
-                binc = np.bincount(np.clip(vh, 1, K), minlength=K+1)[1:]
+            if lab.shape[1] != num_heads:
+                raise ValueError(f"Expected {num_heads} heads, got {lab.shape[1]}")
+            idx = np.clip(lab - level_offset, 0, K - 1)
+            for h in range(num_heads):
+                total[h] += idx.shape[0]
+                binc = np.bincount(idx[:, h], minlength=K)
                 counts[h] += binc
         minority = []
-        for h in range(3):
+        label_vals = np.arange(level_offset, level_offset + K)
+        for h in range(num_heads):
             prev = counts[h] / max(total[h], 1)
-            idx = [c+1 for c in range(K) if prev[c] < threshold]
-            if not idx:
-                idx = list(np.argsort(prev)[:bottom_m] + 1)
-            minority.append(idx)
+            chosen = label_vals[prev < threshold]
+            if chosen.size == 0:
+                chosen = label_vals[np.argsort(prev)[:bottom_m]]
+            minority.append(chosen.tolist())
         return minority
 
-    minority_classes = _compute_minority_classes(dl_train, K=5)
+    minority_classes = _compute_minority_classes(dl_train, K=K, num_heads=num_heads, level_offset=level_offset)
     setattr(args, "minority_classes", minority_classes)
     if is_main_process():
         print(f"[info] minority classes per head (from TRAIN): {minority_classes}")
     
     model = MultiHeadDeberta(
         args.model_name,
-        num_heads=3,
-        num_classes=5,
+        num_heads=num_heads,
+        num_classes=K,
         freeze_encoder=args.freeze_encoder,
         dropout=args.dropout,
         local_files_only=bool(args.hf_offline),
@@ -545,15 +578,15 @@ def main():
         
 
     # Stateful loss
-    Y_all = ds.get_all_targets_tensor().to(device)
+    Y_all = Y_all_cpu.to(device)
     if args.loss == "jager":
         loss_fn = JAGeRLoss(
-            Y=Y_all, K=5,
+            Y=Y_all, K=K,
             joint=bool(args.joint),
             mixture=bool(args.mixture),
             conf_gating=bool(args.conf_gating),
             reassignment=bool(args.reassignment),
-            level_offset=1,
+            level_offset=args.level_offset,
             softplus=True,
             λ0=args.lambda0,
             α=args.alpha,
@@ -563,7 +596,10 @@ def main():
             steps_per_epoch=len(dl_train)
         ).to(device)
     else:
-        loss_fn = MultiHeadCELoss(Y=Y_all, K=5, label_smoothing=args.ce_label_smoothing).to(device)
+        loss_fn = MultiHeadCELoss(
+            Y=Y_all, K=K,
+            level_offset=args.level_offset,
+            label_smoothing=args.ce_label_smoothing).to(device)
 
 
     # ---- Static buffer stats (λ, ρ) captured once per run/split ----
@@ -602,7 +638,6 @@ def main():
 
     # -------- Eval-only fast path (no training) --------
     if args.eval_only:
-        import json
         best_path = os.path.join(args.save_dir, "best.pt")
         assert os.path.exists(best_path), f"Missing {best_path}"
         ckpt = torch.load(best_path, map_location="cpu")
@@ -776,6 +811,7 @@ def main():
 
             # average QWK across heads
             avg_qwk = float(sum(qwks) / len(qwks)) if len(qwks) else float("nan")
+            head_names = list(args.target_cols)
             print(
                 f"[epoch {epoch}] val_loss={val_loss:.4f} "
                 f"qwk={tuple(f'{x:.4f}' for x in qwks)} "
@@ -785,31 +821,31 @@ def main():
                 f"tailR0avg={tail_recall_avg:.4f}"
             )
             if run_wandb is not None:
-                wandb.log({
-                    "train/loss_epoch": float(running / max(1, math.ceil(len(dl_train)/args.grad_accum))),
+                log = {
+                    "train/loss_epoch": float(
+                        running / max(1, math.ceil(len(dl_train) / args.grad_accum))
+                    ),
                     "val/loss": float(val_loss),
-                    "val/qwk_content": float(qwks[0]),
-                    "val/qwk_organization": float(qwks[1]),
-                    "val/qwk_language": float(qwks[2]),
                     "val/qwk_average": float(avg_qwk),
-                    "val/emd_content": float(emds[0]),
-                    "val/emd_organization": float(emds[1]),
-                    "val/emd_language": float(emds[2]),
                     "val/macroEMD": float(macro_emd),
-                    "val/tail_recall0_content": float(tail_recalls[0]),
-                    "val/tail_recall0_organization": float(tail_recalls[1]),
-                    "val/tail_recall0_language": float(tail_recalls[2]),
                     "val/tail_recall0_average": float(tail_recall_avg),
-                }, step=global_step)
+                }
+                for h, name in enumerate(head_names):
+                    log[f"val/qwk_{name}"] = float(qwks[h])
+                    log[f"val/emd_{name}"] = float(emds[h])
+                    log[f"val/tail_recall0_{name}"] = float(tail_recalls[h])
+                wandb.log(log, step=global_step)
 
-            head_names = ["content", "organization", "language"]
             for h, name in enumerate(head_names):
-                print(f"[{name}] confusion matrix (rows=true 1..5, cols=pred 1..5):")
+                if h >= len(cms):
+                    break
+                lo = int(args.level_offset); hi = lo + K - 1
+                print(f"[{name}] confusion matrix (rows=true {lo}..{hi}, cols=pred {lo}..{hi}):")
                 cm = cms[h]
                 print("\n".join("  " + " ".join(f"{v:4d}" for v in row) for row in cm))
             # W&B heatmaps for VAL
             if run_wandb is not None:
-                _log_cms_as_wandb_images(cms, split="val", head_names=head_names, step=global_step)
+                _log_cms_as_wandb_images(cms, split="val", head_names=head_names, level_offset=level_offset, step=global_step)
             # --- append per-epoch metrics CSV (one row per epoch) ---
             try:
                 os.makedirs(args.save_dir, exist_ok=True)
@@ -818,13 +854,14 @@ def main():
                     "epoch": int(epoch),
                     "train_loss_avg": float(running / max(1, math.ceil(len(dl_train)/args.grad_accum))),
                     "val_loss": float(val_loss),
-                    "qwk_c": float(qwks[0]), "qwk_o": float(qwks[1]), "qwk_l": float(qwks[2]),
                     "qwk_avg": float(avg_qwk),
-                    "emd_c": float(emds[0]), "emd_o": float(emds[1]), "emd_l": float(emds[2]),
                     "macroEMD": float(macro_emd),
-                    "tailR0_c": float(tail_recalls[0]), "tailR0_o": float(tail_recalls[1]), "tailR0_l": float(tail_recalls[2]),
                     "tailR0_avg": float(tail_recall_avg),
                 }
+                for h, name in enumerate(head_names):
+                    row[f"qwk_{name}"] = float(qwks[h])
+                    row[f"emd_{name}"] = float(emds[h])
+                    row[f"tailR0_{name}"] = float(tail_recalls[h])
                 is_new = not os.path.exists(metrics_path)
                 with open(metrics_path, "a", newline="") as f:
                     w = csv.DictWriter(f, fieldnames=list(row.keys()))
@@ -848,7 +885,12 @@ def main():
             os.makedirs(args.save_dir, exist_ok=True)
             torch.save({
                 "model": to_save,
-                "config": {"model_name": args.model_name, "K": 5, "heads": 3},
+                "config": {
+                    "model_name": args.model_name,
+                    "K": K,
+                    "heads": num_heads,
+                    "target_cols": target_cols,
+                },
                 "best_avg_qwk": float(best_qwk),
                 "epoch": int(epoch),
             }, path)
@@ -960,27 +1002,21 @@ def main():
             )
 
             if run_wandb is not None:
-                wandb.log({
+                log = {
                     "test/loss": float(test_loss),
-                    "test/qwk_content": float(tqwks[0]),
-                    "test/qwk_organization": float(tqwks[1]),
-                    "test/qwk_language": float(tqwks[2]),
                     "test/qwk_average": float(tavg_qwk),
-                    "test/emd_content": float(temds[0]),
-                    "test/emd_organization": float(temds[1]),
-                    "test/emd_language": float(temds[2]),
                     "test/macroEMD": float(tmacro_emd),
-                    "test/tail_recall0_content": float(ttails[0]),
-                    "test/tail_recall0_organization": float(ttails[1]),
-                    "test/tail_recall0_language": float(ttails[2]),
-                    "test/tail_recall0_average": float(ttails_avg)
-                }, step=global_step)
+                    "test/tail_recall0_average": float(ttails_avg),
+                }
+                for h, name in enumerate(head_names):
+                    log[f"test/qwk_{name}"] = float(tqwks[h])
+                    log[f"test/emd_{name}"] = float(temds[h])
+                    log[f"test/tail_recall0_{name}"] = float(ttails[h])
+                wandb.log(log, step=global_step)
                 # W&B heatmaps for TEST
-                _log_cms_as_wandb_images(tcms, split="test", head_names=("content","organization","language"), step=global_step)
-
+                _log_cms_as_wandb_images(tcms, split="test", head_names=head_names, level_offset=level_offset, step=global_step)
 
             # write compact metrics.json
-            import json
             run_args = vars(args).copy()
             metrics = {
                 "val": {
@@ -1031,7 +1067,7 @@ def main():
         for rec in keep[1:]:
             if not np.array_equal(base_ids, rec["ids"]):
                 raise RuntimeError("Validation ids changed across epochs; cannot ensemble. Check val shuffle.")
-        head_names = ("content", "organization", "language")
+        head_names = list(keep[0]["p"].keys())
         avg_p = {}
         for h in head_names:
             stack = np.stack([rec["p"][h] for rec in keep], axis=0)  # (Ekeep, N, C)
@@ -1045,15 +1081,15 @@ def main():
             for h in head_names:
                 p = avg_p[h][i]                 # (C,)
                 C = p.shape[-1]
-                classes = np.arange(1, C+1, dtype=float)
+                classes = np.arange(int(args.level_offset), int(args.level_offset) + C, dtype=float)
                 exp = float((p * classes).sum())
-                pred = int(1 + np.argmax(p))
+                pred = int(classes[int(np.argmax(p))])
                 yt = int(y_true[h][i])
                 row[f"{h}_y"]   = yt
                 row[f"{h}_exp"] = exp
                 row[f"{h}_pred"]= pred
-                for k in range(C):
-                    row[f"{h}_p{k+1}"] = float(p[k])
+                for j, c in enumerate(classes):
+                    row[f"{h}_p{int(c)}"] = float(p[j])
             rows.append(row)
         os.makedirs(args.save_dir, exist_ok=True)
         oof_path = os.path.join(args.save_dir, f"oof_val_T{T}.csv")
@@ -1070,14 +1106,16 @@ def main():
                 model.module if is_dist() else model,
                 dl_val, loss_fn, device, args
             )
-            import json
             p = os.path.join(args.save_dir, "metrics.json")
             obj = {}
             if os.path.exists(p):
                 with open(p) as f:
-                    obj = json.load(f)
+                    try:
+                        obj = json.load(f)
+                    except Exception:
+                        obj = {}
             v_avg_qwk = float(sum(v_qwks) / len(v_qwks)) if len(v_qwks) else float("nan")
-            obj["val"] = {
+            final_val = {
                 "loss": v_loss,
                 "qwk": v_qwks,
                 "qwk_average": v_avg_qwk,
@@ -1086,7 +1124,13 @@ def main():
                 "macroEMD": v_macro_emd,
                 "tail_recall0": v_tails,
                 "tail_recall0_average": v_tails_avg,
-}
+            }
+            # If best-epoch VAL metrics were already written (from eval_test on improve),
+            # keep them as-is and store final-epoch VAL metrics separately.
+            if "val" in obj:
+                obj.setdefault("extra", {})["val_final"] = final_val
+            else:
+                obj["val"] = final_val
 
             obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", static_stats)
             with open(p, "w") as f:

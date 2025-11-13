@@ -111,12 +111,12 @@ class JAGeRLoss(nn.Module):
         #--- Setup for ρ estimation
 
         # Numerical constants
-        self._sqrt3 = sqrt(3)
-        self._13rd = 1/3
+        self.sqrt3 = sqrt(3)
+        _13rd = self._13rd = 1/3
 
-        _Mn, _Vn, _Sn, _Kn = self._cent_moments(π)
+        Mn, Vn, Sn, Kn = self._cent_moments(π)
         
-        _Mu_raw = torch.tensor([
+        Mu_raw = torch.tensor([
           1,
           (K-1)/2,
           (K-1)*(2*K-1)/6,
@@ -125,36 +125,38 @@ class JAGeRLoss(nn.Module):
         ], dtype=torch.float64, device=dev)
 
         ### Mean ###
-        # self._Mu1 = _Mu_raw[1]
-        self._δm = _Mn - _Mu_raw[1]
-        self._δm_sq = self._δm.square()
-        self._δm_cu2 = self._δm_sq*self._δm*2
-        self._δm_qu = self._δm_sq.square()
+        δm = self.δm = Mn - Mu_raw[1]
+        δm_sq = self.δm_sq = self.δm.square()
+        δm_cu2 = self.δm_cu2 = δm_sq*self.δm*2
+        δm_qu = self.δm_qu = δm_sq.square()
 
-        self._eq_m1 = torch.isclose(self._δm, torch.zeros_like(self._δm))
+        eq_m1 = self.eq_m1 = torch.isclose(δm, torch.zeros_like(δm))
 
         ### Variance ###
-        self._Vu = _Mu_raw[2] - _Mu_raw[1]**2
-        self._δv = _Vn - self._Vu
+        Vu = self.Vu = Mu_raw[2] - Mu_raw[1]**2
+        δv = self.δv = Vn - Vu
         # Depressing shift
-        self._ρ0 = (self._δv / self._δm_sq + 1)*.5
-        self._ρ0[self._eq_m1] = self._Vu/self._δv[self._eq_m1]
-        self._r0 = self._Vu/self._δm_sq + self._ρ0**2
+        self.ρ0 = (δv / δm_sq + 1)*.5
+        self.ρ0[eq_m1] = Vu/δv[eq_m1]
+        ρ0 = self.ρ0
+        r0 = self.r0 = Vu/δm_sq + ρ0.square()
 
         ### Skewness ###
-        _Sn /= self._δm_cu2
+        Sn /= δm_cu2
 
         ### Kurtosis ###
-        self._Ku = (_Mu_raw[4] - 4*_Mu_raw[3]*_Mu_raw[1] + 6*_Mu_raw[2]*_Mu_raw[1].square() - 3*_Mu_raw[1].square().square()).tile(K)
-        self._δK = _Kn - self._Ku
-        self._Ku[~self._eq_m1] /= 3*self._δm_qu[~self._eq_m1]
-        self._δK[~self._eq_m1] /= 3*self._δm_qu[~self._eq_m1]
+        self.Ku = (Mu_raw[4] - 4*Mu_raw[3]*Mu_raw[1] + 6*Mu_raw[2]*Mu_raw[1].square() - 3*Mu_raw[1].square().square()).tile(K)
+        self.δK = Kn - self.Ku
+        self.Ku[~eq_m1] /= 3*δm_qu[~eq_m1]
+        self.δK[~eq_m1] /= 3*δm_qu[~eq_m1]
+        Ku = self.Ku
+        δK = self.δK
         # Numerator coefficients (coef3 = 0, coef4 = 1)
-        S = 8*self._13rd*_Sn + 2*self._r0
-        self._coef_K = torch.stack((
-          -self._Ku - self._ρ0*(self._δK - (self._ρ0-1)*S + 5*((self._ρ0-2*self._13rd)**3 - 1/27)),
-          2*(self._ρ0-.5)*(S - 6*(self._ρ0-.5).square() - .5*self._13rd) - self._δK,
-          S - 8*(self._ρ0-.5).square() - 2*self._13rd
+        S = 8*_13rd*Sn + 2*r0
+        self.coef_K = torch.stack((
+          -Ku - ρ0*(δK - (ρ0-1)*S + 5*((ρ0-2*_13rd)**3 - 1/27)),
+          2*(ρ0-.5)*(S - 6*(ρ0-.5).square() - .5*_13rd) - δK,
+          S - 8*(ρ0-.5).square() - 2*_13rd
         ))
         
         
@@ -236,13 +238,14 @@ class JAGeRLoss(nn.Module):
     ν = ν.long()
 
     # Gather per-ν constants (broadcast to (B, H))
-    msk = self._eq_m1[ν]
-    δv = self._δv[ν]  # (B, H)
-    Ku = self._Ku[ν]
-    δK = self._δK[ν]
-    ρ0 = self._ρ0[ν]
-    r0 = self._r0[ν]
+    msk = self.eq_m1[ν]
+    δv = self.δv[ν]  # (B, H)
+    Ku = self.Ku[ν]
+    δK = self.δK[ν]
+    ρ0 = self.ρ0[ν]
+    r0 = self.r0[ν]
     Kπ_1 = self.Kπ_1[ν]
+    logK = self.logK
 
     ρ = torch.empty_like(ν, dtype=torch.float64)  # Initialize ρ tensor
 
@@ -252,7 +255,7 @@ class JAGeRLoss(nn.Module):
     kurt_quad_roots = (b - ρ0[msk]).unsqueeze(-1) + torch.stack((-D, D), dim=1)  # (M,2)
     kurt_quad_roots = kurt_quad_roots.clamp(0, 1)
     
-    log_υ_roots = (kurt_quad_roots.unsqueeze(-1) * Kπ_1[msk].unsqueeze(1)).log1p() - self.logK  # (M,2,K)
+    log_υ_roots = (kurt_quad_roots.unsqueeze(-1) * Kπ_1[msk].unsqueeze(1)).log1p() - logK  # (M,2,K)
     
     ce = self._ce(probs[msk].unsqueeze(1), log_υ_roots)  # (M,2)
     idx = ce.argmin(dim=1)  # (M,)
@@ -261,9 +264,9 @@ class JAGeRLoss(nn.Module):
 
 
     # Case 2: general (quartic)
-    coef_K0 = self._coef_K[0][ν]
-    coef_K1 = self._coef_K[1][ν]
-    coef_K2 = self._coef_K[2][ν]
+    coef_K0 = self.coef_K[0][ν]
+    coef_K1 = self.coef_K[1][ν]
+    coef_K2 = self.coef_K[2][ν]
     _13rd = self._13rd
     _cbrt = self._cbrt
     
@@ -306,7 +309,7 @@ class JAGeRLoss(nn.Module):
     ], dim=-1) + ρ0.unsqueeze(-1) 
     kurt_quart_roots = kurt_quart_roots.clamp(0, 1)
 
-    log_υ_roots = (kurt_quart_roots.unsqueeze(-1) * Kπ_1.unsqueeze(-2)).log1p() - self.logK  
+    log_υ_roots = (kurt_quart_roots.unsqueeze(-1) * Kπ_1.unsqueeze(-2)).log1p() - logK  
     ce = self._ce(probs.unsqueeze(-2), log_υ_roots)
     idx = ce.argmin(dim=-1)  
     ρ[~msk] = kurt_quart_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)[~msk]
@@ -339,7 +342,7 @@ class JAGeRLoss(nn.Module):
 
       if mixture:
         log_p_h_max, _mode = log_p_h.max(dim=2)
-        _mean, _var, _skew, _kurt = self._cent_moments(p_h) 
+        mean, _var, _skew, _kurt = self._cent_moments(p_h) 
         ρ = self._estimate_ρ(_mode, _kurt / _var.square().clamp_min(self._eps), p_h)
       
       if conf_gating:
@@ -498,18 +501,24 @@ class JAGeRLoss(nn.Module):
 
 class MultiHeadCELoss(nn.Module):
 
-  def __init__(self, Y: torch.Tensor, K: int, label_smoothing: float = 0.0):
+  def __init__(self, Y: torch.Tensor, K: int, level_offset: int = 1, label_smoothing: float = 0.0):
     super().__init__()
     self.register_buffer("Y", Y.to(torch.long))
     self.K = K
+    self.level_offset = level_offset
     self.H = Y.shape[1]
     self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
 
   def forward(self, y_pred: torch.Tensor, ids: torch.Tensor, update_state: bool = False) -> torch.Tensor:
     B, H, K = y_pred.shape
     assert H == self.H and K == self.K, "shape mismatch for CE loss"
-    y = self.Y[ids]
+    Y = self.Y[ids]
+    idx = Y - self.level_offset
+    if (idx < 0).any() or (idx >= self.K).any():
+        raise ValueError(
+            f"Labels out of range for MultiHeadCELoss given level_offset={self.level_offset}, K={self.K}."
+        )
     losses = []
     for h in range(H):
-        losses.append(self.ce(y_pred[:, h, :], y[:, h] - 1))
+        losses.append(self.ce(y_pred[:, h, :], idx[:, h]))
     return torch.stack(losses, dim=0).mean()
