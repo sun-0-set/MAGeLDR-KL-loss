@@ -18,7 +18,6 @@ import numpy as np
 from modeling_multitask import MultiHeadDeberta
 from data_utils import EssayDataset
 from loss import JAGeRLoss, MultiHeadCELoss
-
 try:
     import wandb
     _WANDB_OK = True
@@ -443,6 +442,9 @@ def main():
         ds_train = Subset(ds, train_ids)
         ds_val   = Subset(ds, val_ids)
         ds_test  = None
+        
+    # Whether a test set exists AND the user asked to evaluate it
+    eval_test_flag = bool(args.eval_test and ds_test is not None)
 
     level_offset = int(args.level_offset)
     if args.max_level is not None:
