@@ -506,6 +506,6 @@ class MultiHeadCELoss(nn.Module):
     self.Y = (Y - level_offset).long()
     self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
 
-  def forward(self, y_pred: torch.Tensor, ids: torch.Tensor, update_state: bool = False) -> torch.Tensor:
+  def forward(self, y_pred: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
     Y = self.Y[ids]
     return self.ce(y_pred.mT, Y)
