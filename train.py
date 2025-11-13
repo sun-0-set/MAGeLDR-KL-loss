@@ -17,7 +17,7 @@ from sklearn.metrics import confusion_matrix, cohen_kappa_score, recall_score
 import numpy as np
 from modeling_multitask import MultiHeadDeberta
 from data_utils import EssayDataset
-from loss import JAGeRLoss
+from loss import JAGeRLoss, MultiHeadCELoss
 try:
     import wandb
     _WANDB_OK = True
@@ -598,7 +598,7 @@ def main():
             steps_per_epoch=len(dl_train)
         ).to(device)
     else:
-        loss_fn = nn.MultiHeadCELoss(
+        loss_fn = MultiHeadCELoss(
             Y = Y_all,
             level_offset = args.level_offset,
             label_smoothing=args.ce_label_smoothing,
