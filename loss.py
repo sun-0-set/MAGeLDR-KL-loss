@@ -503,22 +503,9 @@ class MultiHeadCELoss(nn.Module):
 
   def __init__(self, Y: torch.Tensor, K: int, level_offset: int = 1, label_smoothing: float = 0.0):
     super().__init__()
-    self.register_buffer("Y", Y.to(torch.long))
-    self.K = K
-    self.level_offset = level_offset
-    self.H = Y.shape[1]
+    self.Y = (Y - level_offset).long()
     self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
 
   def forward(self, y_pred: torch.Tensor, ids: torch.Tensor, update_state: bool = False) -> torch.Tensor:
-    B, H, K = y_pred.shape
-    assert H == self.H and K == self.K, "shape mismatch for CE loss"
     Y = self.Y[ids]
-    idx = Y - self.level_offset
-    if (idx < 0).any() or (idx >= self.K).any():
-        raise ValueError(
-            f"Labels out of range for MultiHeadCELoss given level_offset={self.level_offset}, K={self.K}."
-        )
-    losses = []
-    for h in range(H):
-        losses.append(self.ce(y_pred[:, h, :], idx[:, h]))
-    return torch.stack(losses, dim=0).mean()
+    return self.ce(y_pred, Y)
