@@ -501,7 +501,7 @@ class JAGeRLoss(nn.Module):
 
 class MultiHeadCELoss(nn.Module):
 
-  def __init__(self, Y: torch.Tensor, K: int, level_offset: int = 1, label_smoothing: float = 0.0):
+  def __init__(self, Y: torch.Tensor, level_offset: int = 1, label_smoothing: float = 0.0):
     super().__init__()
     self.Y = (Y - level_offset).long()
     self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")

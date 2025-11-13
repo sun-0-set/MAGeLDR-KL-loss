@@ -598,9 +598,11 @@ def main():
             steps_per_epoch=len(dl_train)
         ).to(device)
     else:
-        loss_fn = nn.CrossEntropyLoss(
-            reduction="mean",
+        loss_fn = nn.MultiHeadCELoss(
+            Y = Y_all,
+            level_offset = args.level_offset,
             label_smoothing=args.ce_label_smoothing,
+            reduction="mean",
         ).to(device)
 
 
