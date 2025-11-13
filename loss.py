@@ -508,4 +508,4 @@ class MultiHeadCELoss(nn.Module):
 
   def forward(self, y_pred: torch.Tensor, ids: torch.Tensor, update_state: bool = False) -> torch.Tensor:
     Y = self.Y[ids]
-    return self.ce(y_pred.T, Y)
+    return self.ce(y_pred.mT, Y)
