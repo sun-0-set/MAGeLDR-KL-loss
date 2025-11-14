@@ -1,13 +1,13 @@
-transformers>=4.42
-tokenizers>=0.15
-sentencepiece>=0.1.99
-huggingface_hub>=0.24
-safetensors>=0.4.2
+transformers
+tokenizers
+sentencepiece
+huggingface_hub
+safetensors
 
-pandas>=2.2
-numpy>=1.26
-scikit-learn>=1.4
-iterative-stratification>=0.1.9
-scipy>=1.11
-tqdm>=4.66
-wandb>=0.21
+pandas
+numpy
+scikit-learn
+iterative-stratification
+scipy
+tqdm
+wandb
