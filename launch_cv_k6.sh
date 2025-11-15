@@ -15,9 +15,9 @@ MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
 EPOCHS=35
 T=7
-BATCH=38
-ACCUM=2
-MAXLEN=808
+BATCH=4
+ACCUM=8
+MAXLEN=1024
 
 COMMON=(--tsv "$TSV" --model_name "$MODEL" --max_length "$MAXLEN"
         --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
@@ -29,6 +29,7 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 
 JOBS=(
   "ce"
+  "ce --ce_label_smoothing 0.1"
   "jager --joint 0 --mixture 0 --conf_gating 0 --reassignment 0"
   "jager --joint 1 --mixture 0 --conf_gating 0 --reassignment 0"
   "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 0"

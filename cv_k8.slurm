@@ -30,10 +30,10 @@ DATA_PATH="$SCRIPT_DIR/../data/English-Language-Learners-Evaluation/ELA_Dataset_
 
 MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
-EPOCHS=50         # <- as requested
+EPOCHS=50
 T=10
-BATCH=4           # <- as requested
-ACCUM=8           # <- as requested
+BATCH=4
+ACCUM=8
 MAXLEN=1024
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
@@ -44,9 +44,6 @@ COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
 export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_SHOW_CPP_STACKTRACES=1
-
-# ---- Loss / job grid --------------------------------------------------------
-# Includes plain CE and CE with label smoothing 0.1, plus all JAGeR configs.
 
 JOBS=(
   "ce"
