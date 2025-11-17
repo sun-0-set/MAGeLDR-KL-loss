@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=0
-#SBATCH --time=12:00:00
+#SBATCH --time=6:00:00
 #SBATCH --array=0-7
 #SBATCH --output=slurm_logs/aes_cv_k8_%A_%a.out
 #SBATCH --error=slurm_logs/aes_cv_k8_%A_%a.err
@@ -30,7 +30,7 @@ DATA_PATH="$SCRIPT_DIR/../data/English-Language-Learners-Evaluation/ELA_Dataset_
 
 MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
-EPOCHS=50
+EPOCHS=40
 T=10
 BATCH=4
 ACCUM=8
