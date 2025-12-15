@@ -1,12 +1,12 @@
-#!/bin/bash
+#!/bin/bash -l
 #SBATCH -p a100 
 #SBATCH --job-name=aes_cv_k8
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=0
-#SBATCH --time=6:00:00
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=128G
+#SBATCH --time=12:00:00
 #SBATCH --array=0-7
 #SBATCH --output=slurm_logs/aes_cv_k8_%A_%a.out
 #SBATCH --error=slurm_logs/aes_cv_k8_%A_%a.err
@@ -14,11 +14,37 @@
 #SBATCH --mail-type=FAIL   					# Send a notification email when the job fails (=FAIL)
 #SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au  	# Email to which notifications will be sent
 
+# ---- Environment (conda) ---------------------------------------------------
+
+# Make sure usual shell config is loaded (modules, etc.)
+if [[ -f "$HOME/.bashrc" ]]; then
+  source "$HOME/.bashrc"
+fi
+
+# Initialise conda in this non-interactive shell
+eval "$(conda shell.bash hook)"
+
+# Activate the env
+conda activate jager-cv-k8
+
+echo "[info] which python: $(which python)"
+echo "[info] which torchrun: $(which torchrun)"
+python -c "import torch; print('[info] torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+
+
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+# Prefer the directory where `sbatch` was run (project root on HPC)
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  SCRIPT_DIR="$SLURM_SUBMIT_DIR"
+else
+  # Fallback for running locally with `bash cv_k8.slurm`
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+fi
+
 cd "$SCRIPT_DIR"
 echo "[info] PWD=$PWD"
+echo "[info] SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-none}"
 echo "[info] SLURM_JOB_ID=${SLURM_JOB_ID:-none}  TASK_ID=${SLURM_ARRAY_TASK_ID:-none}"
 
 # ---- CV + data config -------------------------------------------------------
