@@ -15,7 +15,7 @@ Outputs: fold0..fold7.json with {train,val,test}, plus meta.json.
 """
 
 import argparse, os, json, math
-from collections import defaultdict, Counter
+from collections import Counter
 from typing import Dict, List, Tuple, Any
 
 import numpy as np
@@ -53,16 +53,23 @@ def human_counts(d: Dict[Any, int]) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tsv", required=True)
+    ap.add_argument("--data-file", required=True,
+                    help="Path to CSV/TSV with at least a prompt column and one or more label columns.")
+    ap.add_argument("--sep", default=None,
+                    help="Field separator. If omitted, guessed from extension (.tsv=>\\t, else ,).")
     ap.add_argument("--outdir", default="splits/k8_promptcv")
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--prompt-col", default=None,
-                    help="Column with prompt id/name; tries ['prompt_id','prompt','topic','Task','Prompt'] if omitted.")
     ap.add_argument("--id-col", default=None,
                     help="Optional stable ID column. If omitted, row index (0..N-1) is used.")
-    ap.add_argument("--y-cols", default="content,organization,language",
-                    help="Comma-separated label columns (per-head analytic scores).")
+    ap.add_argument("--prompt-col", default=None,
+                    help="Name of the prompt/Task column. If omitted, tries common candidates.")
+    ap.add_argument("--essay-col", default=None,
+                    help="Optional essay/text column name (only used to exclude from label inference).")
+    ap.add_argument("--label-cols", default=None,
+                    help="Comma-separated list of label/response columns. If omitted, inferred as all numeric columns excluding id/prompt/essay and --exclude-cols.")
+    ap.add_argument("--exclude-cols", default="",
+                    help="Comma-separated columns to exclude from label inference (e.g., year, fold, score_mean).")
     ap.add_argument("--scarce-thresh", type=float, default=0.10,
                     help="Score share threshold to mark a class as scarce (per head). Default=0.10 (10%%).")
     ap.add_argument("--min-class-global", type=int, default=20,
@@ -71,18 +78,64 @@ def main():
                     help="Allowed ± deviation from N/K when checking fold sizes. Default=0.15 (±15%%).")
     args = ap.parse_args()
 
-    rng = np.random.default_rng(args.seed)
+    # Load data with sep guess
+    if args.sep is not None:
+        sep = args.sep
+    else:
+        sep = "\t" if str(args.data_file).lower().endswith(".tsv") else ","
+    df = pd.read_csv(args.data_file, sep=sep, header=0)
 
-    # Load data
-    df = pd.read_csv(args.tsv, sep="\t")
-    if args.prompt_col is None:
-        args.prompt_col = infer_col(df.columns, ["prompt_id", "prompt", "topic", "Task", "Prompt"])
-    prompt_col = args.prompt_col
+    # Resolve prompt/essay columns
+    if args.prompt_col:
+        if args.prompt_col not in df.columns:
+            raise SystemExit(f"[error] prompt-col '{args.prompt_col}' not found in data.")
+        prompt_col = args.prompt_col
+    else:
+        # Try common candidates
+        prompt_col = infer_col(
+            df.columns,
+            ["prompt", "Prompt", "topic", "Topic", "question", "Question", "task", "Task"]
+        )
 
-    ycols = [c.strip() for c in args.y_cols.split(",") if c.strip()]
-    for c in ycols:
-        if c not in df.columns:
-            raise SystemExit(f"[error] Missing label column: {c}")
+    essay_col = None
+    if args.essay_col:
+        if args.essay_col not in df.columns:
+            raise SystemExit(f"[error] essay-col '{args.essay_col}' not found in data.")
+        essay_col = args.essay_col
+    else:
+        # Optional: try to find a likely essay/text column; ok if missing
+        try:
+            essay_col = infer_col(
+                df.columns,
+                ["essay", "Essay", "response", "Response", "text", "Text"]
+            )
+        except SystemExit:
+            essay_col = None
+
+    # Resolve ID vector
+    if args.id_col is None:
+        ids = np.arange(len(df), dtype=int)
+    else:
+        if args.id_col not in df.columns:
+            raise SystemExit(f"[error] id-col '{args.id_col}' not found in data.")
+        ids = df[args.id_col].to_numpy()
+
+    # Label columns: explicit or inferred
+    if args.label_cols:
+        ycols = [c.strip() for c in args.label_cols.split(",") if c.strip()]
+        missing = [c for c in ycols if c not in df.columns]
+        if missing:
+            raise SystemExit(f"[error] label-cols not found: {missing}")
+    else:
+        base_exclude = {c for c in [args.id_col, prompt_col, essay_col] if c}
+        user_exclude = {c.strip() for c in args.exclude_cols.split(",") if c.strip()}
+        exclude = base_exclude | user_exclude
+        ycols = [
+            c for c in df.columns
+            if c not in exclude and pd.api.types.is_numeric_dtype(df[c])
+        ]
+        if not ycols:
+            raise SystemExit("[error] No label columns found. Specify --label-cols or ensure numeric labels exist.")
 
     if args.id_col is None:
         ids = np.arange(len(df), dtype=int)

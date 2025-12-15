@@ -1,12 +1,12 @@
-#!/bin/bash
+#!/bin/bash -l
 #SBATCH -p a100 
 #SBATCH --job-name=aes_cv_k8
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=0
-#SBATCH --time=6:00:00
+#SBATCH --mem=56G
+#SBATCH --time=7:00:00
 #SBATCH --array=0-7
 #SBATCH --output=slurm_logs/aes_cv_k8_%A_%a.out
 #SBATCH --error=slurm_logs/aes_cv_k8_%A_%a.err
