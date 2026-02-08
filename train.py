@@ -370,395 +370,422 @@ def main():
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")  # avoid noisy warnings
     
     run_wandb = _maybe_init_wandb(args) if is_main_process() else None
-    
-    np.random.seed(args.seed + (dist.get_rank() if is_dist() else 0))
-    
-    os.makedirs(args.save_dir, exist_ok=True)
-    local_rank = setup_distributed()
-    set_seed(args.seed + (dist.get_rank() if is_dist() else 0))
-
-    device = torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() and local_rank != -1 \
-             else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.set_num_threads(max(1, os.cpu_count() or 1))
-    if device.type == "cuda":
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-
-    # Build dataset 
-    tok_path = os.path.join(args.model_name, "tokenizer.json")
-    if os.path.isdir(args.model_name) and os.path.exists(tok_path):
-        tok = PreTrainedTokenizerFast(tokenizer_file=tok_path)
-        spec_path = os.path.join(args.model_name, "special_tokens_map.json")
-        added = 0
-        if os.path.exists(spec_path):
-            with open(spec_path) as _f:
-                spec = json.load(_f)
-            to_add = {k: v for k, v in spec.items() if isinstance(v, str)}
-            if to_add:
-                added = tok.add_special_tokens(to_add)
-    else:
-        tok = AutoTokenizer.from_pretrained(
-            args.model_name,
-            use_fast=bool(args.use_fast_tokenizer),
-            local_files_only=bool(args.hf_offline),
-            trust_remote_code=False,
-        )
-    if is_main_process():
-        print(
-            f"[tok] class={tok.__class__.__name__} fast={getattr(tok, 'is_fast', None)} "
-            f"src={'tokenizer.json' if os.path.exists(tok_path) else args.model_name}"
-        )
-    # ---- Generic dataset + splits ----
-    ds = EssayDataset(
-        path=args.data_path,
-        tokenizer_name=args.model_name,
-        max_length=args.max_length,
-        tokenizer=tok,
-    )
-    target_cols = ds.target_cols
-    num_heads = len(target_cols)
-    Y_all_cpu = ds.get_all_targets_tensor()
-
-    if args.split_file and os.path.exists(args.split_file):
-        with open(args.split_file) as f:
-            split = json.load(f)
-        train_ids = [int(i) for i in split["train"]]
-        val_ids   = [int(i) for i in split["val"]]
-        test_ids  = [int(i) for i in split.get("test", [])]
-        ds_train = Subset(ds, train_ids)
-        ds_val   = Subset(ds, val_ids)
-        ds_test  = Subset(ds, test_ids) if test_ids else None
-    else:
-        idx_all = np.arange(len(ds))
-        tr_idx, va_idx = train_test_split(
-            idx_all,
-            test_size=args.val_frac,
-            random_state=args.seed,
-            shuffle=True,
-            stratify=None,
-        )
-        train_ids = [int(i) for i in tr_idx]
-        val_ids   = [int(i) for i in va_idx]
-        ds_train = Subset(ds, train_ids)
-        ds_val   = Subset(ds, val_ids)
-        ds_test  = None
-        
-    # Whether a test set exists AND the user asked to evaluate it
-    eval_test_flag = bool(args.eval_test and ds_test is not None)
-
-    level_offset = int(args.level_offset)
-    if args.max_level is not None:
-        max_level = int(args.max_level)
-    else:
-        max_level = int(Y_all_cpu.max().item())
-    if max_level < level_offset:
-        raise ValueError(f"max_level ({max_level}) must be >= level_offset ({level_offset}).")
-    if ((Y_all_cpu < level_offset) | (Y_all_cpu > max_level)).any():
-        y_min = int(Y_all_cpu.min().item()); y_max = int(Y_all_cpu.max().item())
-        raise ValueError(
-            f"Label values outside declared support [{level_offset}, {max_level}]: min={y_min}, max={y_max}."
-        )
-    K = max_level - level_offset + 1
-    args.target_cols = target_cols
-    args.num_heads = num_heads
-    args.level_offset = level_offset
-    args.max_level = max_level
-    args.K = K
-
-    if args.limit_train and args.limit_train < len(ds_train):
-        ds_train = Subset(ds_train, list(range(args.limit_train)))
-    if args.limit_val and args.limit_val < len(ds_val):
-        ds_val = Subset(ds_val, list(range(args.limit_val)))
-
-    collate = DataCollatorWithPadding(tokenizer=tok, pad_to_multiple_of=(args.pad_to_multiple_of if args.pad_to_multiple_of > 0 else None))
-    if tok.pad_token is None:
-        if tok.sep_token is not None:
-            tok.pad_token = tok.sep_token
-        elif tok.eos_token is not None:
-            tok.pad_token = tok.eos_token
-        else:
-            # track newly added pad token so embeddings can be resized once
-            n_added = tok.add_special_tokens({'pad_token': '[PAD]'})
-            if 'added' in locals():
-                added += n_added
-            else:
-                added = n_added
-
-    # ---- Samplers (DDP) ----
-    train_sampler = None
-    if is_dist():
-        from torch.utils.data.distributed import DistributedSampler
-        train_sampler = DistributedSampler(ds_train, shuffle=True, drop_last=False)
-
-    pin = (device.type == "cuda")
-    
-    _pf = (args.prefetch_factor if args.num_workers > 0 else None)
-    dl_train = DataLoader(
-        ds_train, batch_size=args.batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
-        pin_memory=pin, collate_fn=collate, prefetch_factor=_pf,
-    )
-    
-    dl_val = DataLoader(
-        ds_val, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
-        pin_memory=pin, collate_fn=collate, prefetch_factor=_pf,
-    )
-
-    # ---- Determine minority classes from TRAIN distribution (per head) ----
-    def _compute_minority_classes(dl, K, num_heads, level_offset, threshold=0.10, bottom_m=2):
-        counts = np.zeros((num_heads, K), dtype=np.int64)
-        total = np.zeros(num_heads, dtype=np.int64)
-        for batch in dl:
-            lab = batch["labels"].cpu().numpy()
-            if lab.shape[1] != num_heads:
-                raise ValueError(f"Expected {num_heads} heads, got {lab.shape[1]}")
-            idx = np.clip(lab - level_offset, 0, K - 1)
-            for h in range(num_heads):
-                total[h] += idx.shape[0]
-                binc = np.bincount(idx[:, h], minlength=K)
-                counts[h] += binc
-        minority = []
-        label_vals = np.arange(level_offset, level_offset + K)
-        for h in range(num_heads):
-            prev = counts[h] / max(total[h], 1)
-            chosen = label_vals[prev < threshold]
-            if chosen.size == 0:
-                chosen = label_vals[np.argsort(prev)[:bottom_m]]
-            minority.append(chosen.tolist())
-        return minority
-
-    minority_classes = _compute_minority_classes(dl_train, K=K, num_heads=num_heads, level_offset=level_offset)
-    setattr(args, "minority_classes", minority_classes)
-    if is_main_process():
-        print(f"[info] minority classes per head (from TRAIN): {minority_classes}")
-    
-    model = MultiHeadDeberta(
-        args.model_name,
-        num_heads=num_heads,
-        num_classes=K,
-        freeze_encoder=args.freeze_encoder,
-        dropout=args.dropout,
-        local_files_only=bool(args.hf_offline),
-        trust_remote_code=False,
-        torch_dtype=None, 
-        enable_grad_ckpt=bool(getattr(args, "grad_ckpt", False)), 
-    ).to(device)
 
     try:
-        if 'added' in locals() and added:
-            (model.module if is_dist() else model).resize_token_embeddings(len(tok))
-    except Exception:
-        pass
-
-    # Print gradient checkpointing status
-    def unwrap(m): return m.module if hasattr(m, "module") else m
-    if is_main_process():
-        base = unwrap(model)
-        enc = base.encoder
-        flag = getattr(enc, "is_gradient_checkpointing", None)
-        if flag is None:
-            flag = getattr(getattr(enc, "config", object()), "gradient_checkpointing", False)
-        print(f">> Grad checkpointing: {flag}")
-
     
-    # Wrap with DDP if launched via torchrun
-    if is_dist():
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
-        )
-    
-    # Head-only warmup
-    if args.freeze_encoder:
-        enc = model.module.encoder if is_dist() else model.encoder
-        for p in enc.parameters():
-            p.requires_grad = False
-        if is_main_process():
-            print(">> Encoder frozen (training heads only).")
+        np.random.seed(args.seed + (dist.get_rank() if is_dist() else 0))
         
-
-    # Stateful loss
-    Y_all = Y_all_cpu.to(device)
-    if args.loss == "jager":
-        loss_fn = JAGeRLoss(
-            Y=Y_all, K=K,
-            joint=bool(args.joint),
-            mixture=bool(args.mixture),
-            conf_gating=bool(args.conf_gating),
-            reassignment=bool(args.reassignment),
-            level_offset=args.level_offset,
-            softplus=True,
-            λ0=args.lambda0,
-            α=args.alpha,
-            C=args.C,
-            log_to_wandb=bool(getattr(args, "wandb", False)),
-            def_batch_size=args.batch_size,
-            steps_per_epoch=len(dl_train)
-        ).to(device)
-    else:
-        loss_fn = MultiHeadCELoss(
-            Y = Y_all,
-            level_offset = args.level_offset,
-            label_smoothing=args.ce_label_smoothing
-        ).to(device)
-
-
-    # ---- Static buffer stats (λ, ρ) captured once per run/split ----
-    idx_all = sorted(set(train_ids) | set(val_ids) | (set(test_ids) if eval_test_flag else set()))
-    views = {
-        "train": train_ids,
-        "val":   val_ids,
-        **({"test": test_ids} if eval_test_flag else {}),
-        "all":   idx_all,
-    }
-    λ = getattr(loss_fn, "λ", None)
-    ρ = getattr(loss_fn, "ρ", None)
-    static_stats = {}
-    for view_name, idx in views.items():
-        if not idx:
-            continue
-        prefix = f"static/{view_name}/"
-        if isinstance(λ, torch.Tensor):
-            per_head = λ.dim() >= 2
-            static_stats[prefix + "lambda"] = _gather_stats_from_buffer(λ, idx, per_head=per_head)
-        if isinstance(ρ, torch.Tensor):
-            per_head = ρ.dim() >= 2
-            static_stats[prefix + "rho"] = _gather_stats_from_buffer(ρ, idx, per_head=per_head)
-    if is_main_process() and run_wandb is not None:
-        flat = {}
-        for k, v in static_stats.items():
-            if isinstance(v, dict) and isinstance(v.get("mean"), list):
-                for h, m in enumerate(v["mean"]): flat[f"{k}/mean/h{h}"] = m
-                for h, m in enumerate(v.get("min", [])): flat[f"{k}/min/h{h}"] = m
-                for h, m in enumerate(v.get("max", [])): flat[f"{k}/max/h{h}"] = m
-            else:
-                flat[f"{k}/mean"] = v["mean"]; flat[f"{k}/min"] = v["min"]; flat[f"{k}/max"] = v["max"]
-        wandb.log(flat, step=0)
-
-
-
-    # -------- Eval-only fast path (no training) --------
-    if args.eval_only:
-        best_path = os.path.join(args.save_dir, "best.pt")
-        assert os.path.exists(best_path), f"Missing {best_path}"
-        ckpt = torch.load(best_path, map_location="cpu")
-        (model.module if is_dist() else model).load_state_dict(ckpt["model"])
-
-        test_loader = None
-        if ds_test is not None:
-            test_loader = DataLoader(
-                ds_test, batch_size=args.batch_size, shuffle=False,
-                num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
-                pin_memory=pin, collate_fn=collate, prefetch_factor=_pf
-            )
-
-        val_loss, vcms, vqwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
-            model.module if is_dist() else model,
-            dl_val, loss_fn, device, args=args
-        )
-        v_avg_qwk = float(sum(vqwks)/len(vqwks)) if len(vqwks) else float("nan")
-        payload = {
-            "val": {
-                "loss": val_loss,
-                "qwk": vqwks,
-                "qwk_average": v_avg_qwk,
-                "cm": [cm.tolist() for cm in vcms],
-                "emd": v_emds,
-                "macroEMD": v_macro_emd,
-                "tail_recall0": v_tails,
-                "tail_recall0_average": v_tails_avg,
-            }
-        }
-        if args.eval_test and test_loader is not None:
-            test_loss, tcms, tqwks, t_emds, t_macro_emd, t_tails, t_tails_avg = evaluate(
-                model.module if is_dist() else model,
-                test_loader, loss_fn, device, args=args
-            )
-            t_avg_qwk = float(sum(tqwks)/len(tqwks)) if len(tqwks) else float("nan")
-            payload["test"] = {
-                "loss": test_loss,
-                "qwk": tqwks,
-                "qwk_average": t_avg_qwk,
-                "cm": [cm.tolist() for cm in tcms],
-                "emd": t_emds,
-                "macroEMD": t_macro_emd,
-                "tail_recall0": t_tails,
-                "tail_recall0_average": t_tails_avg,
-            }
-
-        payload.setdefault("extra", {})["static_stats"] = static_stats
         os.makedirs(args.save_dir, exist_ok=True)
-        with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
-            json.dump(payload, f, indent=2)
-        print(f"[EVAL-ONLY] wrote {os.path.join(args.save_dir, 'metrics.json')}")
-        return
+        local_rank = setup_distributed()
+        set_seed(args.seed + (dist.get_rank() if is_dist() else 0))
 
+        device = torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() and local_rank != -1 \
+                else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.set_num_threads(max(1, os.cpu_count() or 1))
+        if device.type == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
-    optim = torch.optim.AdamW(model.parameters(), fused=(device.type == "cuda"), lr=args.lr, weight_decay=args.weight_decay)
+        # Build dataset 
+        tok_path = os.path.join(args.model_name, "tokenizer.json")
+        if os.path.isdir(args.model_name) and os.path.exists(tok_path):
+            tok = PreTrainedTokenizerFast(tokenizer_file=tok_path)
+            spec_path = os.path.join(args.model_name, "special_tokens_map.json")
+            added = 0
+            if os.path.exists(spec_path):
+                with open(spec_path) as _f:
+                    spec = json.load(_f)
+                to_add = {k: v for k, v in spec.items() if isinstance(v, str)}
+                if to_add:
+                    added = tok.add_special_tokens(to_add)
+        else:
+            tok = AutoTokenizer.from_pretrained(
+                args.model_name,
+                use_fast=bool(args.use_fast_tokenizer),
+                local_files_only=bool(args.hf_offline),
+                trust_remote_code=False,
+            )
+        if is_main_process():
+            print(
+                f"[tok] class={tok.__class__.__name__} fast={getattr(tok, 'is_fast', None)} "
+                f"src={'tokenizer.json' if os.path.exists(tok_path) else args.model_name}"
+            )
+        # ---- Generic dataset + splits ----
+        ds = EssayDataset(
+            path=args.data_path,
+            tokenizer_name=args.model_name,
+            max_length=args.max_length,
+            tokenizer=tok,
+        )
+        target_cols = ds.target_cols
+        num_heads = len(target_cols)
+        Y_all_cpu = ds.get_all_targets_tensor()
 
-    # scheduler: 10% warmup
-    total_steps = math.ceil(len(dl_train) / args.grad_accum) * args.epochs
-    warmup = max(1, int(0.1 * total_steps))
-    sched = get_linear_schedule_with_warmup(optim, warmup, total_steps)
+        if args.split_file and os.path.exists(args.split_file):
+            with open(args.split_file) as f:
+                split = json.load(f)
+            train_ids = [int(i) for i in split["train"]]
+            val_ids   = [int(i) for i in split["val"]]
+            test_ids  = [int(i) for i in split.get("test", [])]
+            ds_train = Subset(ds, train_ids)
+            ds_val   = Subset(ds, val_ids)
+            ds_test  = Subset(ds, test_ids) if test_ids else None
+        else:
+            idx_all = np.arange(len(ds))
+            tr_idx, va_idx = train_test_split(
+                idx_all,
+                test_size=args.val_frac,
+                random_state=args.seed,
+                shuffle=True,
+                stratify=None,
+            )
+            train_ids = [int(i) for i in tr_idx]
+            val_ids   = [int(i) for i in va_idx]
+            ds_train = Subset(ds, train_ids)
+            ds_val   = Subset(ds, val_ids)
+            ds_test  = None
+            
+        # Whether a test set exists AND the user asked to evaluate it
+        eval_test_flag = bool(args.eval_test and ds_test is not None)
 
-    use_amp   = (device.type == "cuda")
-    amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
-    scaler = None
-    if AmpGradScaler is not None:
-        scaler = AmpGradScaler(enabled=use_amp and (amp_dtype is torch.float16))
+        level_offset = int(args.level_offset)
+        if args.max_level is not None:
+            max_level = int(args.max_level)
+        else:
+            max_level = int(Y_all_cpu.max().item())
+        if max_level < level_offset:
+            raise ValueError(f"max_level ({max_level}) must be >= level_offset ({level_offset}).")
+        if ((Y_all_cpu < level_offset) | (Y_all_cpu > max_level)).any():
+            y_min = int(Y_all_cpu.min().item()); y_max = int(Y_all_cpu.max().item())
+            raise ValueError(
+                f"Label values outside declared support [{level_offset}, {max_level}]: min={y_min}, max={y_max}."
+            )
+        K = max_level - level_offset + 1
+        args.target_cols = target_cols
+        args.num_heads = num_heads
+        args.level_offset = level_offset
+        args.max_level = max_level
+        args.K = K
 
-    best_qwk = float("-inf")
-    improved = False
-    global_step = 0
-    val_pred_epochs = []  # list of {"epoch": int, "ids": np.ndarray, "y": dict, "p": dict}
+        if args.limit_train and args.limit_train < len(ds_train):
+            ds_train = Subset(ds_train, list(range(args.limit_train)))
+        if args.limit_val and args.limit_val < len(ds_val):
+            ds_val = Subset(ds_val, list(range(args.limit_val)))
 
-    for epoch in range(1, args.epochs+1):
-        if is_dist() and train_sampler is not None:
-            train_sampler.set_epoch(epoch)
-        # Unfreeze at a chosen epoch (for GPU runs)
-        if args.unfreeze_at_epoch == epoch:
+        collate = DataCollatorWithPadding(tokenizer=tok, pad_to_multiple_of=(args.pad_to_multiple_of if args.pad_to_multiple_of > 0 else None))
+        if tok.pad_token is None:
+            if tok.sep_token is not None:
+                tok.pad_token = tok.sep_token
+            elif tok.eos_token is not None:
+                tok.pad_token = tok.eos_token
+            else:
+                # track newly added pad token so embeddings can be resized once
+                n_added = tok.add_special_tokens({'pad_token': '[PAD]'})
+                if 'added' in locals():
+                    added += n_added
+                else:
+                    added = n_added
+
+        # ---- Samplers (DDP) ----
+        train_sampler = None
+        if is_dist():
+            from torch.utils.data.distributed import DistributedSampler
+            train_sampler = DistributedSampler(ds_train, shuffle=True, drop_last=False)
+
+        pin = (device.type == "cuda")
+        
+        _pf = (args.prefetch_factor if args.num_workers > 0 else None)
+        dl_train = DataLoader(
+            ds_train, batch_size=args.batch_size,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
+            num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
+            pin_memory=pin, collate_fn=collate, prefetch_factor=_pf,
+        )
+        
+        dl_val = DataLoader(
+            ds_val, batch_size=args.batch_size, shuffle=False,
+            num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
+            pin_memory=pin, collate_fn=collate, prefetch_factor=_pf,
+        )
+
+        # ---- Determine minority classes from TRAIN distribution (per head) ----
+        def _compute_minority_classes(dl, K, num_heads, level_offset, threshold=0.10, bottom_m=2):
+            counts = np.zeros((num_heads, K), dtype=np.int64)
+            total = np.zeros(num_heads, dtype=np.int64)
+            for batch in dl:
+                lab = batch["labels"].cpu().numpy()
+                if lab.shape[1] != num_heads:
+                    raise ValueError(f"Expected {num_heads} heads, got {lab.shape[1]}")
+                idx = np.clip(lab - level_offset, 0, K - 1)
+                for h in range(num_heads):
+                    total[h] += idx.shape[0]
+                    binc = np.bincount(idx[:, h], minlength=K)
+                    counts[h] += binc
+            minority = []
+            label_vals = np.arange(level_offset, level_offset + K)
+            for h in range(num_heads):
+                prev = counts[h] / max(total[h], 1)
+                chosen = label_vals[prev < threshold]
+                if chosen.size == 0:
+                    chosen = label_vals[np.argsort(prev)[:bottom_m]]
+                minority.append(chosen.tolist())
+            return minority
+
+        minority_classes = _compute_minority_classes(dl_train, K=K, num_heads=num_heads, level_offset=level_offset)
+        setattr(args, "minority_classes", minority_classes)
+        if is_main_process():
+            print(f"[info] minority classes per head (from TRAIN): {minority_classes}")
+        
+        model = MultiHeadDeberta(
+            args.model_name,
+            num_heads=num_heads,
+            num_classes=K,
+            freeze_encoder=args.freeze_encoder,
+            dropout=args.dropout,
+            local_files_only=bool(args.hf_offline),
+            trust_remote_code=False,
+            torch_dtype=None, 
+            enable_grad_ckpt=bool(getattr(args, "grad_ckpt", False)), 
+        ).to(device)
+
+        try:
+            if 'added' in locals() and added:
+                (model.module if is_dist() else model).resize_token_embeddings(len(tok))
+        except Exception:
+            pass
+
+        # Print gradient checkpointing status
+        def unwrap(m): return m.module if hasattr(m, "module") else m
+        if is_main_process():
+            base = unwrap(model)
+            enc = base.encoder
+            flag = getattr(enc, "is_gradient_checkpointing", None)
+            if flag is None:
+                flag = getattr(getattr(enc, "config", object()), "gradient_checkpointing", False)
+            print(f">> Grad checkpointing: {flag}")
+
+        
+        # Wrap with DDP if launched via torchrun
+        if is_dist():
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
+            )
+        
+        # Head-only warmup
+        if args.freeze_encoder:
             enc = model.module.encoder if is_dist() else model.encoder
             for p in enc.parameters():
-                p.requires_grad = True
+                p.requires_grad = False
             if is_main_process():
-                print(f">> Unfroze encoder at epoch {epoch}.")
-        model.train()
-        running, step_in_accum = 0.0, 0
-        for step, batch in enumerate(dl_train, start=1):
-            ids = batch["ids"].to(device, non_blocking=pin)
-            input_ids = batch["input_ids"].to(device, non_blocking=pin)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=pin)
+                print(">> Encoder frozen (training heads only).")
+            
 
-            # Decide sync scope for DDP: skip gradient all-reduce on non-boundary steps
-            next_accum   = step_in_accum + 1
-            ddp          = (is_dist() and hasattr(model, "no_sync"))
-            sync_needed  = (next_accum % args.grad_accum == 0)
-            sync_ctx     = contextlib.nullcontext() if (not ddp or sync_needed) else model.no_sync()
+        # Stateful loss
+        Y_all = Y_all_cpu.to(device)
+        if args.loss == "jager":
+            loss_fn = JAGeRLoss(
+                Y=Y_all, K=K,
+                joint=bool(args.joint),
+                mixture=bool(args.mixture),
+                conf_gating=bool(args.conf_gating),
+                reassignment=bool(args.reassignment),
+                level_offset=args.level_offset,
+                softplus=True,
+                λ0=args.lambda0,
+                α=args.alpha,
+                C=args.C,
+                log_to_wandb=bool(getattr(args, "wandb", False)),
+                def_batch_size=args.batch_size,
+                steps_per_epoch=len(dl_train)
+            ).to(device)
+        else:
+            loss_fn = MultiHeadCELoss(
+                Y = Y_all,
+                level_offset = args.level_offset,
+                label_smoothing=args.ce_label_smoothing
+            ).to(device)
 
-            with sync_ctx:
-                # Autocast forward (bf16 on A100)
-                with amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
-                    out = model(input_ids=input_ids, attention_mask=attention_mask)
-                y_pred = out["logits"].to(torch.float64)  # cast up for JAGeR
-                # per-forward state updates in loss; pass 0-based micro-step consistent across ranks
-                micro_step = (epoch - 1) * len(dl_train) + (step - 1)
-                try:
-                    loss = loss_fn(y_pred, ids, update_state=True, global_step=micro_step) / args.grad_accum
-                except TypeError:
-                    # CE baseline signature (no global_step)
-                    loss = loss_fn(y_pred, ids) / args.grad_accum
-                if scaler is not None and scaler.is_enabled():
-                    scaler.scale(loss).backward()
+
+        # ---- Static buffer stats (λ, ρ) captured once per run/split ----
+        idx_all = sorted(set(train_ids) | set(val_ids) | (set(test_ids) if eval_test_flag else set()))
+        views = {
+            "train": train_ids,
+            "val":   val_ids,
+            **({"test": test_ids} if eval_test_flag else {}),
+            "all":   idx_all,
+        }
+        λ = getattr(loss_fn, "λ", None)
+        ρ = getattr(loss_fn, "ρ", None)
+        static_stats = {}
+        for view_name, idx in views.items():
+            if not idx:
+                continue
+            prefix = f"static/{view_name}/"
+            if isinstance(λ, torch.Tensor):
+                per_head = λ.dim() >= 2
+                static_stats[prefix + "lambda"] = _gather_stats_from_buffer(λ, idx, per_head=per_head)
+            if isinstance(ρ, torch.Tensor):
+                per_head = ρ.dim() >= 2
+                static_stats[prefix + "rho"] = _gather_stats_from_buffer(ρ, idx, per_head=per_head)
+        if is_main_process() and run_wandb is not None:
+            flat = {}
+            for k, v in static_stats.items():
+                if isinstance(v, dict) and isinstance(v.get("mean"), list):
+                    for h, m in enumerate(v["mean"]): flat[f"{k}/mean/h{h}"] = m
+                    for h, m in enumerate(v.get("min", [])): flat[f"{k}/min/h{h}"] = m
+                    for h, m in enumerate(v.get("max", [])): flat[f"{k}/max/h{h}"] = m
                 else:
-                    loss.backward()
-                running += loss.item()
-                
-                step_in_accum = next_accum
+                    flat[f"{k}/mean"] = v["mean"]; flat[f"{k}/min"] = v["min"]; flat[f"{k}/max"] = v["max"]
+            wandb.log(flat, step=0)
 
-            if step_in_accum % args.grad_accum == 0:
-                print(f"[epoch {epoch}] step {step}/{len(dl_train)}: loss={running/step_in_accum:.4f} ")    
+
+
+        # -------- Eval-only fast path (no training) --------
+        if args.eval_only:
+            best_path = os.path.join(args.save_dir, "best.pt")
+            assert os.path.exists(best_path), f"Missing {best_path}"
+            ckpt = torch.load(best_path, map_location="cpu")
+            (model.module if is_dist() else model).load_state_dict(ckpt["model"])
+
+            test_loader = None
+            if ds_test is not None:
+                test_loader = DataLoader(
+                    ds_test, batch_size=args.batch_size, shuffle=False,
+                    num_workers=args.num_workers, persistent_workers=(args.num_workers > 0),
+                    pin_memory=pin, collate_fn=collate, prefetch_factor=_pf
+                )
+
+            val_loss, vcms, vqwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
+                model.module if is_dist() else model,
+                dl_val, loss_fn, device, args=args
+            )
+            v_avg_qwk = float(sum(vqwks)/len(vqwks)) if len(vqwks) else float("nan")
+            payload = {
+                "val": {
+                    "loss": val_loss,
+                    "qwk": vqwks,
+                    "qwk_average": v_avg_qwk,
+                    "cm": [cm.tolist() for cm in vcms],
+                    "emd": v_emds,
+                    "macroEMD": v_macro_emd,
+                    "tail_recall0": v_tails,
+                    "tail_recall0_average": v_tails_avg,
+                }
+            }
+            if args.eval_test and test_loader is not None:
+                test_loss, tcms, tqwks, t_emds, t_macro_emd, t_tails, t_tails_avg = evaluate(
+                    model.module if is_dist() else model,
+                    test_loader, loss_fn, device, args=args
+                )
+                t_avg_qwk = float(sum(tqwks)/len(tqwks)) if len(tqwks) else float("nan")
+                payload["test"] = {
+                    "loss": test_loss,
+                    "qwk": tqwks,
+                    "qwk_average": t_avg_qwk,
+                    "cm": [cm.tolist() for cm in tcms],
+                    "emd": t_emds,
+                    "macroEMD": t_macro_emd,
+                    "tail_recall0": t_tails,
+                    "tail_recall0_average": t_tails_avg,
+                }
+
+            payload.setdefault("extra", {})["static_stats"] = static_stats
+            os.makedirs(args.save_dir, exist_ok=True)
+            with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
+                json.dump(payload, f, indent=2)
+            print(f"[EVAL-ONLY] wrote {os.path.join(args.save_dir, 'metrics.json')}")
+            return
+
+
+        optim = torch.optim.AdamW(model.parameters(), fused=(device.type == "cuda"), lr=args.lr, weight_decay=args.weight_decay)
+
+        # scheduler: 10% warmup
+        total_steps = math.ceil(len(dl_train) / args.grad_accum) * args.epochs
+        warmup = max(1, int(0.1 * total_steps))
+        sched = get_linear_schedule_with_warmup(optim, warmup, total_steps)
+
+        use_amp   = (device.type == "cuda")
+        amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+        scaler = None
+        if AmpGradScaler is not None:
+            scaler = AmpGradScaler(enabled=use_amp and (amp_dtype is torch.float16))
+
+        best_qwk = float("-inf")
+        improved = False
+        global_step = 0
+        val_pred_epochs = []  # list of {"epoch": int, "ids": np.ndarray, "y": dict, "p": dict}
+
+        for epoch in range(1, args.epochs+1):
+            if is_dist() and train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            # Unfreeze at a chosen epoch (for GPU runs)
+            if args.unfreeze_at_epoch == epoch:
+                enc = model.module.encoder if is_dist() else model.encoder
+                for p in enc.parameters():
+                    p.requires_grad = True
+                if is_main_process():
+                    print(f">> Unfroze encoder at epoch {epoch}.")
+            model.train()
+            running, step_in_accum = 0.0, 0
+            for step, batch in enumerate(dl_train, start=1):
+                ids = batch["ids"].to(device, non_blocking=pin)
+                input_ids = batch["input_ids"].to(device, non_blocking=pin)
+                attention_mask = batch["attention_mask"].to(device, non_blocking=pin)
+
+                # Decide sync scope for DDP: skip gradient all-reduce on non-boundary steps
+                next_accum   = step_in_accum + 1
+                ddp          = (is_dist() and hasattr(model, "no_sync"))
+                sync_needed  = (next_accum % args.grad_accum == 0)
+                sync_ctx     = contextlib.nullcontext() if (not ddp or sync_needed) else model.no_sync()
+
+                with sync_ctx:
+                    # Autocast forward (bf16 on A100)
+                    with amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                        out = model(input_ids=input_ids, attention_mask=attention_mask)
+                    y_pred = out["logits"].to(torch.float64)  # cast up for JAGeR
+                    # per-forward state updates in loss; pass 0-based micro-step consistent across ranks
+                    micro_step = (epoch - 1) * len(dl_train) + (step - 1)
+                    try:
+                        loss = loss_fn(y_pred, ids, update_state=True, global_step=micro_step) / args.grad_accum
+                    except TypeError:
+                        # CE baseline signature (no global_step)
+                        loss = loss_fn(y_pred, ids) / args.grad_accum
+                    if scaler is not None and scaler.is_enabled():
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+                    running += loss.item()
+                    
+                    step_in_accum = next_accum
+
+                if step_in_accum % args.grad_accum == 0:
+                    print(f"[epoch {epoch}] step {step}/{len(dl_train)}: loss={running/step_in_accum:.4f} ")    
+                    if scaler is not None and scaler.is_enabled():
+                        scaler.unscale_(optim)
+                    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    if scaler is not None and scaler.is_enabled():
+                        scaler.step(optim); scaler.update()
+                    else:
+                        optim.step()
+                    optim.zero_grad(set_to_none=True); sched.step()
+                    
+                    if run_wandb is not None:
+                        # Per-optimizer-step logging (use last computed loss)
+                        log_dict = {"train/loss_step": float(loss.detach().cpu()), "epoch": epoch}
+                        # λ stats (only for JAGeR loss)
+                        λ = getattr(loss_fn, "λ", None)
+                        if isinstance(λ, torch.Tensor):
+                            lam_det = λ.detach()
+                            log_dict["train/lambda_min"] = float(lam_det.min().cpu())
+                            log_dict["train/lambda_max"] = float(lam_det.max().cpu())
+                        if (global_step % max(1, args.log_every)) == 0:
+                            wandb.log(log_dict, step=global_step)
+                        global_step += 1
+
+
+            # finish partial accumulation
+            if (step_in_accum % args.grad_accum) != 0:
                 if scaler is not None and scaler.is_enabled():
                     scaler.unscale_(optim)
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -767,387 +794,369 @@ def main():
                 else:
                     optim.step()
                 optim.zero_grad(set_to_none=True); sched.step()
-                
-                if run_wandb is not None:
-                    # Per-optimizer-step logging (use last computed loss)
-                    log_dict = {"train/loss_step": float(loss.detach().cpu()), "epoch": epoch}
-                    # λ stats (only for JAGeR loss)
-                    λ = getattr(loss_fn, "λ", None)
-                    if isinstance(λ, torch.Tensor):
-                        lam_det = λ.detach()
-                        log_dict["train/lambda_min"] = float(lam_det.min().cpu())
-                        log_dict["train/lambda_max"] = float(lam_det.max().cpu())
-                    if (global_step % max(1, args.log_every)) == 0:
-                        wandb.log(log_dict, step=global_step)
-                    global_step += 1
 
+            # Monitor λ range
+            if hasattr(loss_fn, "λ") and isinstance(getattr(loss_fn, "λ", None), torch.Tensor):
+                with torch.no_grad():
+                    λ = loss_fn.λ
+                    lam_min = λ.min().item(); lam_max = λ.max().item()
+                if is_main_process():
+                    print(f"[epoch {epoch}] train_loss(avg per step)={running/max(1, math.ceil(len(dl_train)/args.grad_accum)):.4f} "
+                            f"lambda[min,max]=[{lam_min:.6f},{lam_max:.6f}]")
 
-        # finish partial accumulation
-        if (step_in_accum % args.grad_accum) != 0:
-            if scaler is not None and scaler.is_enabled():
-                scaler.unscale_(optim)
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            if scaler is not None and scaler.is_enabled():
-                scaler.step(optim); scaler.update()
-            else:
-                optim.step()
-            optim.zero_grad(set_to_none=True); sched.step()
-
-        # Monitor λ range
-        if hasattr(loss_fn, "λ") and isinstance(getattr(loss_fn, "λ", None), torch.Tensor):
-            with torch.no_grad():
-                λ = loss_fn.λ
-                lam_min = λ.min().item(); lam_max = λ.max().item()
+            # Evaluate on rank 0 only
             if is_main_process():
-                print(f"[epoch {epoch}] train_loss(avg per step)={running/max(1, math.ceil(len(dl_train)/args.grad_accum)):.4f} "
-                        f"lambda[min,max]=[{lam_min:.6f},{lam_max:.6f}]")
+                val_loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg = evaluate(
+                    model.module if is_dist() else model,
+                    dl_val, loss_fn, device, args
+                )
+                # collect VAL probs for this epoch (for post-hoc ensembling)
+                ids_e, y_e, p_e = predict_probs_on_loader(model.module if is_dist() else model, dl_val, device)
+                val_pred_epochs.append({"epoch": int(epoch), "ids": ids_e, "y": y_e, "p": p_e})
 
-        # Evaluate on rank 0 only
-        if is_main_process():
-            val_loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg = evaluate(
-                model.module if is_dist() else model,
-                dl_val, loss_fn, device, args
-            )
-            # collect VAL probs for this epoch (for post-hoc ensembling)
-            ids_e, y_e, p_e = predict_probs_on_loader(model.module if is_dist() else model, dl_val, device)
-            val_pred_epochs.append({"epoch": int(epoch), "ids": ids_e, "y": y_e, "p": p_e})
+                # average QWK across heads
+                avg_qwk = float(sum(qwks) / len(qwks)) if len(qwks) else float("nan")
+                head_names = list(args.target_cols)
+                print(
+                    f"[epoch {epoch}] val_loss={val_loss:.4f} "
+                    f"qwk={tuple(f'{x:.4f}' for x in qwks)} "
+                    f"averageQWK={avg_qwk:.4f} "
+                    f"macroEMD={macro_emd:.4f} "
+                    f"tailR0={tuple(f'{x:.4f}' for x in tail_recalls)} "
+                    f"tailR0avg={tail_recall_avg:.4f}"
+                )
+                if run_wandb is not None:
+                    log = {
+                        "train/loss_epoch": float(
+                            running / max(1, math.ceil(len(dl_train) / args.grad_accum))
+                        ),
+                        "val/loss": float(val_loss),
+                        "val/qwk_average": float(avg_qwk),
+                        "val/macroEMD": float(macro_emd),
+                        "val/tail_recall0_average": float(tail_recall_avg),
+                    }
+                    for h, name in enumerate(head_names):
+                        log[f"val/qwk_{name}"] = float(qwks[h])
+                        log[f"val/emd_{name}"] = float(emds[h])
+                        log[f"val/tail_recall0_{name}"] = float(tail_recalls[h])
+                    wandb.log(log, step=global_step)
 
-            # average QWK across heads
-            avg_qwk = float(sum(qwks) / len(qwks)) if len(qwks) else float("nan")
-            head_names = list(args.target_cols)
-            print(
-                f"[epoch {epoch}] val_loss={val_loss:.4f} "
-                f"qwk={tuple(f'{x:.4f}' for x in qwks)} "
-                f"averageQWK={avg_qwk:.4f} "
-                f"macroEMD={macro_emd:.4f} "
-                f"tailR0={tuple(f'{x:.4f}' for x in tail_recalls)} "
-                f"tailR0avg={tail_recall_avg:.4f}"
-            )
-            if run_wandb is not None:
-                log = {
-                    "train/loss_epoch": float(
-                        running / max(1, math.ceil(len(dl_train) / args.grad_accum))
-                    ),
-                    "val/loss": float(val_loss),
-                    "val/qwk_average": float(avg_qwk),
-                    "val/macroEMD": float(macro_emd),
-                    "val/tail_recall0_average": float(tail_recall_avg),
-                }
                 for h, name in enumerate(head_names):
-                    log[f"val/qwk_{name}"] = float(qwks[h])
-                    log[f"val/emd_{name}"] = float(emds[h])
-                    log[f"val/tail_recall0_{name}"] = float(tail_recalls[h])
-                wandb.log(log, step=global_step)
-
-            for h, name in enumerate(head_names):
-                if h >= len(cms):
-                    break
-                lo = int(args.level_offset); hi = lo + K - 1
-                print(f"[{name}] confusion matrix (rows=true {lo}..{hi}, cols=pred {lo}..{hi}):")
-                cm = cms[h]
-                print("\n".join("  " + " ".join(f"{v:4d}" for v in row) for row in cm))
-            # W&B heatmaps for VAL
-            if run_wandb is not None:
-                _log_cms_as_wandb_images(cms, split="val", head_names=head_names, level_offset=level_offset, step=global_step)
-            # --- append per-epoch metrics CSV (one row per epoch) ---
-            try:
-                os.makedirs(args.save_dir, exist_ok=True)
-                metrics_path = os.path.join(args.save_dir, "epoch_metrics.csv")
-                row = {
-                    "epoch": int(epoch),
-                    "train_loss_avg": float(running / max(1, math.ceil(len(dl_train)/args.grad_accum))),
-                    "val_loss": float(val_loss),
-                    "qwk_avg": float(avg_qwk),
-                    "macroEMD": float(macro_emd),
-                    "tailR0_avg": float(tail_recall_avg),
-                }
-                for h, name in enumerate(head_names):
-                    row[f"qwk_{name}"] = float(qwks[h])
-                    row[f"emd_{name}"] = float(emds[h])
-                    row[f"tailR0_{name}"] = float(tail_recalls[h])
-                is_new = not os.path.exists(metrics_path)
-                with open(metrics_path, "a", newline="") as f:
-                    w = csv.DictWriter(f, fieldnames=list(row.keys()))
-                    if is_new:
-                        w.writeheader()
-                    w.writerow(row)
-            except Exception as e:
-                print(f"[warn] failed to write epoch_metrics.csv: {e}")
-
-
-        # ----- determine improvement by avg QWK (maximize), regardless of saving -----
-        improved = False
-        if is_main_process() and (avg_qwk > best_qwk):
-            best_qwk = avg_qwk
-            improved = True
-
-        # ----- save best.pt only if requested -----
-        if improved and is_main_process() and args.save_model:
-            path = os.path.join(args.save_dir, "best.pt")
-            to_save = unwrap(model).state_dict()
-            os.makedirs(args.save_dir, exist_ok=True)
-            torch.save({
-                "model": to_save,
-                "config": {
-                    "model_name": args.model_name,
-                    "K": K,
-                    "heads": num_heads,
-                    "target_cols": target_cols,
-                },
-                "best_avg_qwk": float(best_qwk),
-                "epoch": int(epoch),
-            }, path)
-            with open(os.path.join(args.save_dir, "run_args.json"), "w") as f:
-                json.dump(vars(args), f, indent=2)
-            print(f"  ↑ saved new best (avgQWK={best_qwk:.4f}) to {path}")
-            if run_wandb is not None:
+                    if h >= len(cms):
+                        break
+                    lo = int(args.level_offset); hi = lo + K - 1
+                    print(f"[{name}] confusion matrix (rows=true {lo}..{hi}, cols=pred {lo}..{hi}):")
+                    cm = cms[h]
+                    print("\n".join("  " + " ".join(f"{v:4d}" for v in row) for row in cm))
+                # W&B heatmaps for VAL
+                if run_wandb is not None:
+                    _log_cms_as_wandb_images(cms, split="val", head_names=head_names, level_offset=level_offset, step=global_step)
+                # --- append per-epoch metrics CSV (one row per epoch) ---
                 try:
-                    art = wandb.Artifact(
-                        f"best-{args.loss}-j{args.joint}-m{args.mixture}"
-                        f"-cg{args.conf_gating}-ra{args.reassignment}",
-                        type="model",
-                        metadata={"epoch": int(epoch), "best_avg_qwk": float(best_qwk)},
-                    )
-                    art.add_file(os.path.join(args.save_dir, "best.pt"))
-                    wandb.log_artifact(art)
+                    os.makedirs(args.save_dir, exist_ok=True)
+                    metrics_path = os.path.join(args.save_dir, "epoch_metrics.csv")
+                    row = {
+                        "epoch": int(epoch),
+                        "train_loss_avg": float(running / max(1, math.ceil(len(dl_train)/args.grad_accum))),
+                        "val_loss": float(val_loss),
+                        "qwk_avg": float(avg_qwk),
+                        "macroEMD": float(macro_emd),
+                        "tailR0_avg": float(tail_recall_avg),
+                    }
+                    for h, name in enumerate(head_names):
+                        row[f"qwk_{name}"] = float(qwks[h])
+                        row[f"emd_{name}"] = float(emds[h])
+                        row[f"tailR0_{name}"] = float(tail_recalls[h])
+                    is_new = not os.path.exists(metrics_path)
+                    with open(metrics_path, "a", newline="") as f:
+                        w = csv.DictWriter(f, fieldnames=list(row.keys()))
+                        if is_new:
+                            w.writeheader()
+                        w.writerow(row)
                 except Exception as e:
-                    print("[W&B] artifact log skipped:", e)
+                    print(f"[warn] failed to write epoch_metrics.csv: {e}")
 
-            # --- append per-epoch stats (refit only; enabled by flag) ---
-            if args.log_epoch_stats:
-                # union of train/val/(test if present) was built earlier
-                ids = idx_all
-                row = {"epoch": int(epoch)}
-                # λ: JAGeR shape depends on joint/per-head implementation
-                λ = getattr(loss_fn, "λ", None)
-                if isinstance(λ, torch.Tensor):
-                    sel = λ.detach().cpu()[ids]
-                    if sel.dim() == 1:
-                        row.update({
-                            "λ_min": float(sel.min().item()),
-                            "λ_mean": float(sel.mean().item()),
-                            "λ_max": float(sel.max().item()),
-                        })
-                    else:
-                        means = sel.float().mean(dim=0); mins = sel.min(dim=0).values; maxs = sel.max(dim=0).values
-                        for h in range(means.numel()):
-                            row[f"λ_min_h{h}"]  = float(mins[h].item())
-                            row[f"λ_mean_h{h}"] = float(means[h].item())
-                            row[f"λ_max_h{h}"]  = float(maxs[h].item())
-                # ρ for JAGeR-mixture (1 per head per sample), if present
-                ρ = getattr(loss_fn, "ρ", None)
-                if isinstance(ρ, torch.Tensor):
-                    sel = ρ.detach().cpu()[ids]
-                    means = sel.float().mean(dim=0); mins = sel.min(dim=0).values; maxs = sel.max(dim=0).values
-                    for h in range(means.numel()):
-                        row[f"ρ_min_h{h}"]  = float(mins[h].item())
-                        row[f"ρ_mean_h{h}"] = float(means[h].item())
-                        row[f"ρ_max_h{h}"]  = float(maxs[h].item())
-                # append
-                path = os.path.join(args.save_dir, "epoch_stats.csv")
-                is_new = not os.path.exists(path)
-                cols = ["epoch"] + [k for k in row.keys() if k != "epoch"]
-                with open(path, "a", newline="") as f:
-                    w = csv.DictWriter(f, fieldnames=cols)
-                    if is_new: w.writeheader()
-                    w.writerow(row)
 
-                # Log epoch_stats.csv as a separate artifact (avoid duplicating best.pt)
+            # ----- determine improvement by avg QWK (maximize), regardless of saving -----
+            improved = False
+            if is_main_process() and (avg_qwk > best_qwk):
+                best_qwk = avg_qwk
+                improved = True
+
+            # ----- save best.pt only if requested -----
+            if improved and is_main_process() and args.save_model:
+                path = os.path.join(args.save_dir, "best.pt")
+                to_save = unwrap(model).state_dict()
+                os.makedirs(args.save_dir, exist_ok=True)
+                torch.save({
+                    "model": to_save,
+                    "config": {
+                        "model_name": args.model_name,
+                        "K": K,
+                        "heads": num_heads,
+                        "target_cols": target_cols,
+                    },
+                    "best_avg_qwk": float(best_qwk),
+                    "epoch": int(epoch),
+                }, path)
+                with open(os.path.join(args.save_dir, "run_args.json"), "w") as f:
+                    json.dump(vars(args), f, indent=2)
+                print(f"  ↑ saved new best (avgQWK={best_qwk:.4f}) to {path}")
                 if run_wandb is not None:
                     try:
-                        stats_path = os.path.join(args.save_dir, "epoch_stats.csv")
                         art = wandb.Artifact(
-                            f"epoch-stats-{args.loss}-j{args.joint}-m{args.mixture}"
+                            f"best-{args.loss}-j{args.joint}-m{args.mixture}"
                             f"-cg{args.conf_gating}-ra{args.reassignment}",
-                            type="metrics",
-                            metadata={"epoch": int(epoch)}
+                            type="model",
+                            metadata={"epoch": int(epoch), "best_avg_qwk": float(best_qwk)},
                         )
-                        art.add_file(stats_path)
+                        art.add_file(os.path.join(args.save_dir, "best.pt"))
                         wandb.log_artifact(art)
                     except Exception as e:
-                        print("[W&B] epoch-stats artifact log skipped:", e)
+                        print("[W&B] artifact log skipped:", e)
+
+                # --- append per-epoch stats (refit only; enabled by flag) ---
+                if args.log_epoch_stats:
+                    # union of train/val/(test if present) was built earlier
+                    ids = idx_all
+                    row = {"epoch": int(epoch)}
+                    # λ: JAGeR shape depends on joint/per-head implementation
+                    λ = getattr(loss_fn, "λ", None)
+                    if isinstance(λ, torch.Tensor):
+                        sel = λ.detach().cpu()[ids]
+                        if sel.dim() == 1:
+                            row.update({
+                                "λ_min": float(sel.min().item()),
+                                "λ_mean": float(sel.mean().item()),
+                                "λ_max": float(sel.max().item()),
+                            })
+                        else:
+                            means = sel.float().mean(dim=0); mins = sel.min(dim=0).values; maxs = sel.max(dim=0).values
+                            for h in range(means.numel()):
+                                row[f"λ_min_h{h}"]  = float(mins[h].item())
+                                row[f"λ_mean_h{h}"] = float(means[h].item())
+                                row[f"λ_max_h{h}"]  = float(maxs[h].item())
+                    # ρ for JAGeR-mixture (1 per head per sample), if present
+                    ρ = getattr(loss_fn, "ρ", None)
+                    if isinstance(ρ, torch.Tensor):
+                        sel = ρ.detach().cpu()[ids]
+                        means = sel.float().mean(dim=0); mins = sel.min(dim=0).values; maxs = sel.max(dim=0).values
+                        for h in range(means.numel()):
+                            row[f"ρ_min_h{h}"]  = float(mins[h].item())
+                            row[f"ρ_mean_h{h}"] = float(means[h].item())
+                            row[f"ρ_max_h{h}"]  = float(maxs[h].item())
+                    # append
+                    path = os.path.join(args.save_dir, "epoch_stats.csv")
+                    is_new = not os.path.exists(path)
+                    cols = ["epoch"] + [k for k in row.keys() if k != "epoch"]
+                    with open(path, "a", newline="") as f:
+                        w = csv.DictWriter(f, fieldnames=cols)
+                        if is_new: w.writeheader()
+                        w.writerow(row)
+
+                    # Log epoch_stats.csv as a separate artifact (avoid duplicating best.pt)
+                    if run_wandb is not None:
+                        try:
+                            stats_path = os.path.join(args.save_dir, "epoch_stats.csv")
+                            art = wandb.Artifact(
+                                f"epoch-stats-{args.loss}-j{args.joint}-m{args.mixture}"
+                                f"-cg{args.conf_gating}-ra{args.reassignment}",
+                                type="metrics",
+                                metadata={"epoch": int(epoch)}
+                            )
+                            art.add_file(stats_path)
+                            wandb.log_artifact(art)
+                        except Exception as e:
+                            print("[W&B] epoch-stats artifact log skipped:", e)
 
 
-        # TEST evaluation on improve (even if we didn't save): reload best.pt iff it exists
-        if args.eval_test and improved and ds_test is not None and is_main_process():
-            # reload best
-            best_path = os.path.join(args.save_dir, "best.pt")
-            if args.save_model and os.path.exists(best_path):
-                ckpt = torch.load(best_path, map_location="cpu")
-                unwrap(model).load_state_dict(ckpt["model"])
-            else:
-                print("[TEST] evaluating current in-memory weights (unsaved best)")
+            # TEST evaluation on improve (even if we didn't save): reload best.pt iff it exists
+            if args.eval_test and improved and ds_test is not None and is_main_process():
+                # reload best
+                best_path = os.path.join(args.save_dir, "best.pt")
+                if args.save_model and os.path.exists(best_path):
+                    ckpt = torch.load(best_path, map_location="cpu")
+                    unwrap(model).load_state_dict(ckpt["model"])
+                else:
+                    print("[TEST] evaluating current in-memory weights (unsaved best)")
 
-            test_loader = DataLoader(
-                ds_test, batch_size=args.batch_size, shuffle=False,
-                num_workers=args.num_workers,
-                persistent_workers=(args.num_workers > 0),
-                pin_memory=pin,
-                collate_fn=collate,
-                prefetch_factor=_pf,
-            )
+                test_loader = DataLoader(
+                    ds_test, batch_size=args.batch_size, shuffle=False,
+                    num_workers=args.num_workers,
+                    persistent_workers=(args.num_workers > 0),
+                    pin_memory=pin,
+                    collate_fn=collate,
+                    prefetch_factor=_pf,
+                )
 
-            # evaluate returns: loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg
-            test_loss, tcms, tqwks, temds, tmacro_emd, ttails, ttails_avg = evaluate(
-                unwrap(model), test_loader, loss_fn, device, args
-            )
-            # average QWK across heads (test)
-            tavg_qwk = float(sum(tqwks) / len(tqwks)) if len(tqwks) else float("nan")
+                # evaluate returns: loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg
+                test_loss, tcms, tqwks, temds, tmacro_emd, ttails, ttails_avg = evaluate(
+                    unwrap(model), test_loader, loss_fn, device, args
+                )
+                # average QWK across heads (test)
+                tavg_qwk = float(sum(tqwks) / len(tqwks)) if len(tqwks) else float("nan")
 
-            print(
-                f"[TEST] loss={test_loss:.4f} "
-                f"qwk={tuple(f'{x:.4f}' for x in tqwks)} "
-                f"averageQWK={tavg_qwk:.4f} "
-                f"emd={tuple(f'{x:.4f}' for x in temds)} "
-                f"macroEMD={tmacro_emd:.4f} "
-                f"tailR0={tuple(f'{x:.4f}' for x in ttails)} "
-                f"tailR0avg={ttails_avg:.4f}"
-            )
+                print(
+                    f"[TEST] loss={test_loss:.4f} "
+                    f"qwk={tuple(f'{x:.4f}' for x in tqwks)} "
+                    f"averageQWK={tavg_qwk:.4f} "
+                    f"emd={tuple(f'{x:.4f}' for x in temds)} "
+                    f"macroEMD={tmacro_emd:.4f} "
+                    f"tailR0={tuple(f'{x:.4f}' for x in ttails)} "
+                    f"tailR0avg={ttails_avg:.4f}"
+                )
 
-            if run_wandb is not None:
-                log = {
-                    "test/loss": float(test_loss),
-                    "test/qwk_average": float(tavg_qwk),
-                    "test/macroEMD": float(tmacro_emd),
-                    "test/tail_recall0_average": float(ttails_avg),
+                if run_wandb is not None:
+                    log = {
+                        "test/loss": float(test_loss),
+                        "test/qwk_average": float(tavg_qwk),
+                        "test/macroEMD": float(tmacro_emd),
+                        "test/tail_recall0_average": float(ttails_avg),
+                    }
+                    for h, name in enumerate(head_names):
+                        log[f"test/qwk_{name}"] = float(tqwks[h])
+                        log[f"test/emd_{name}"] = float(temds[h])
+                        log[f"test/tail_recall0_{name}"] = float(ttails[h])
+                    wandb.log(log, step=global_step)
+                    # W&B heatmaps for TEST
+                    _log_cms_as_wandb_images(tcms, split="test", head_names=head_names, level_offset=level_offset, step=global_step)
+
+                # write compact metrics.json
+                run_args = vars(args).copy()
+                metrics = {
+                    "val": {
+                        "loss": val_loss,
+                        "qwk": qwks,
+                        "qwk_average": avg_qwk,
+                        "cm": [cm.tolist() for cm in cms],
+                        "emd": emds,
+                        "macroEMD": macro_emd,
+                        "tail_recall0": tail_recalls,
+                        "tail_recall0_average": tail_recall_avg,
+                    },
+                    "test": {
+                        "loss": test_loss,
+                        "qwk": tqwks,
+                        "qwk_average": tavg_qwk,
+                        "cm": [cm.tolist() for cm in tcms],
+                        "emd": temds,
+                        "macroEMD": tmacro_emd,
+                        "tail_recall0": ttails,
+                        "tail_recall0_average": ttails_avg,
+                    },
+                    "args": {
+                        k: run_args[k] for k in [
+                            "loss", "joint", "mixture", "conf_gating", "reassignment",
+                            "lambda0", "alpha", "C",
+                            "ce_label_smoothing", "seed",
+                            "model_name", "max_length", "batch_size",
+                            "grad_accum", "epochs"
+                        ]
+                    }
                 }
-                for h, name in enumerate(head_names):
-                    log[f"test/qwk_{name}"] = float(tqwks[h])
-                    log[f"test/emd_{name}"] = float(temds[h])
-                    log[f"test/tail_recall0_{name}"] = float(ttails[h])
-                wandb.log(log, step=global_step)
-                # W&B heatmaps for TEST
-                _log_cms_as_wandb_images(tcms, split="test", head_names=head_names, level_offset=level_offset, step=global_step)
-
-            # write compact metrics.json
-            run_args = vars(args).copy()
-            metrics = {
-                "val": {
-                    "loss": val_loss,
-                    "qwk": qwks,
-                    "qwk_average": avg_qwk,
-                    "cm": [cm.tolist() for cm in cms],
-                    "emd": emds,
-                    "macroEMD": macro_emd,
-                    "tail_recall0": tail_recalls,
-                    "tail_recall0_average": tail_recall_avg,
-                },
-                "test": {
-                    "loss": test_loss,
-                    "qwk": tqwks,
-                    "qwk_average": tavg_qwk,
-                    "cm": [cm.tolist() for cm in tcms],
-                    "emd": temds,
-                    "macroEMD": tmacro_emd,
-                    "tail_recall0": ttails,
-                    "tail_recall0_average": ttails_avg,
-                },
-                "args": {
-                    k: run_args[k] for k in [
-                        "loss", "joint", "mixture", "conf_gating", "reassignment",
-                        "lambda0", "alpha", "C",
-                        "ce_label_smoothing", "seed",
-                        "model_name", "max_length", "batch_size",
-                        "grad_accum", "epochs"
-                    ]
-                }
-            }
-            metrics.setdefault("extra", {})["static_stats"] = static_stats
-            with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
-                json.dump(metrics, f, indent=2)
-            print(f"[TEST] wrote {os.path.join(args.save_dir, 'metrics.json')}")
+                metrics.setdefault("extra", {})["static_stats"] = static_stats
+                with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
+                    json.dump(metrics, f, indent=2)
+                print(f"[TEST] wrote {os.path.join(args.save_dir, 'metrics.json')}")
 
 
-        if is_dist(): 
-            dist.barrier()
+            if is_dist(): 
+                dist.barrier()
 
-    # ---------- Last-T-epoch probability ensembling on VAL (OOF for this fold) ----------
-    if is_main_process() and len(val_pred_epochs) > 0:
-        T = max(1, int(getattr(args, "ens_t", 10)))
-        S = max(1, int(getattr(args, "ens_stride", 1)))
-        keep = [rec for rec in val_pred_epochs[-T:]][::S]
-        base_ids = keep[0]["ids"]
-        for rec in keep[1:]:
-            if not np.array_equal(base_ids, rec["ids"]):
-                raise RuntimeError("Validation ids changed across epochs; cannot ensemble. Check val shuffle.")
-        head_names = list(keep[0]["p"].keys())
-        avg_p = {}
-        for h in head_names:
-            stack = np.stack([rec["p"][h] for rec in keep], axis=0)  # (Ekeep, N, C)
-            avg_p[h] = stack.mean(axis=0)                            # (N, C)
-        y_true = keep[0]["y"]
-        ids    = base_ids
-        rows = []
-        fold_name = os.path.basename(os.path.abspath(args.save_dir))
-        for i in range(len(ids)):
-            row = {"id": int(ids[i]), "fold": fold_name}
+        # ---------- Last-T-epoch probability ensembling on VAL (OOF for this fold) ----------
+        if is_main_process() and len(val_pred_epochs) > 0:
+            T = max(1, int(getattr(args, "ens_t", 10)))
+            S = max(1, int(getattr(args, "ens_stride", 1)))
+            keep = [rec for rec in val_pred_epochs[-T:]][::S]
+            base_ids = keep[0]["ids"]
+            for rec in keep[1:]:
+                if not np.array_equal(base_ids, rec["ids"]):
+                    raise RuntimeError("Validation ids changed across epochs; cannot ensemble. Check val shuffle.")
+            head_names = list(keep[0]["p"].keys())
+            avg_p = {}
             for h in head_names:
-                p = avg_p[h][i]                 # (C,)
-                C = p.shape[-1]
-                classes = np.arange(int(args.level_offset), int(args.level_offset) + C, dtype=float)
-                exp = float((p * classes).sum())
-                pred = int(classes[int(np.argmax(p))])
-                yt = int(y_true[h][i])
-                row[f"{h}_y"]   = yt
-                row[f"{h}_exp"] = exp
-                row[f"{h}_pred"]= pred
-                for j, c in enumerate(classes):
-                    row[f"{h}_p{int(c)}"] = float(p[j])
-            rows.append(row)
-        os.makedirs(args.save_dir, exist_ok=True)
-        oof_path = os.path.join(args.save_dir, f"oof_val_T{T}.csv")
-        with open(oof_path, "w", newline="") as f:
-            fieldnames = list(rows[0].keys()) if rows else ["id"]
-            w = csv.DictWriter(f, fieldnames=fieldnames); w.writeheader()
-            for r in rows: w.writerow(r)
-        print(f"[oof] wrote ensembled OOF-val predictions: {oof_path}")
+                stack = np.stack([rec["p"][h] for rec in keep], axis=0)  # (Ekeep, N, C)
+                avg_p[h] = stack.mean(axis=0)                            # (N, C)
+            y_true = keep[0]["y"]
+            ids    = base_ids
+            rows = []
+            fold_name = os.path.basename(os.path.abspath(args.save_dir))
+            for i in range(len(ids)):
+                row = {"id": int(ids[i]), "fold": fold_name}
+                for h in head_names:
+                    p = avg_p[h][i]                 # (C,)
+                    C = p.shape[-1]
+                    classes = np.arange(int(args.level_offset), int(args.level_offset) + C, dtype=float)
+                    exp = float((p * classes).sum())
+                    pred = int(classes[int(np.argmax(p))])
+                    yt = int(y_true[h][i])
+                    row[f"{h}_y"]   = yt
+                    row[f"{h}_exp"] = exp
+                    row[f"{h}_pred"]= pred
+                    for j, c in enumerate(classes):
+                        row[f"{h}_p{int(c)}"] = float(p[j])
+                rows.append(row)
+            os.makedirs(args.save_dir, exist_ok=True)
+            oof_path = os.path.join(args.save_dir, f"oof_val_T{T}.csv")
+            with open(oof_path, "w", newline="") as f:
+                fieldnames = list(rows[0].keys()) if rows else ["id"]
+                w = csv.DictWriter(f, fieldnames=fieldnames); w.writeheader()
+                for r in rows: w.writerow(r)
+            print(f"[oof] wrote ensembled OOF-val predictions: {oof_path}")
 
 
-    if is_main_process() and dl_val is not None:
-        try:
-            v_loss, v_cms, v_qwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
-                model.module if is_dist() else model,
-                dl_val, loss_fn, device, args
-            )
-            p = os.path.join(args.save_dir, "metrics.json")
-            obj = {}
-            if os.path.exists(p):
-                with open(p) as f:
-                    try:
-                        obj = json.load(f)
-                    except Exception:
-                        obj = {}
-            v_avg_qwk = float(sum(v_qwks) / len(v_qwks)) if len(v_qwks) else float("nan")
-            final_val = {
-                "loss": v_loss,
-                "qwk": v_qwks,
-                "qwk_average": v_avg_qwk,
-                "cm": [cm.tolist() for cm in v_cms],
-                "emd": v_emds,
-                "macroEMD": v_macro_emd,
-                "tail_recall0": v_tails,
-                "tail_recall0_average": v_tails_avg,
-            }
-            # If best-epoch VAL metrics were already written (from eval_test on improve),
-            # keep them as-is and store final-epoch VAL metrics separately.
-            if "val" in obj:
-                obj.setdefault("extra", {})["val_final"] = final_val
-            else:
-                obj["val"] = final_val
+        if is_main_process() and dl_val is not None:
+            try:
+                v_loss, v_cms, v_qwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
+                    model.module if is_dist() else model,
+                    dl_val, loss_fn, device, args
+                )
+                p = os.path.join(args.save_dir, "metrics.json")
+                obj = {}
+                if os.path.exists(p):
+                    with open(p) as f:
+                        try:
+                            obj = json.load(f)
+                        except Exception:
+                            obj = {}
+                v_avg_qwk = float(sum(v_qwks) / len(v_qwks)) if len(v_qwks) else float("nan")
+                final_val = {
+                    "loss": v_loss,
+                    "qwk": v_qwks,
+                    "qwk_average": v_avg_qwk,
+                    "cm": [cm.tolist() for cm in v_cms],
+                    "emd": v_emds,
+                    "macroEMD": v_macro_emd,
+                    "tail_recall0": v_tails,
+                    "tail_recall0_average": v_tails_avg,
+                }
+                # If best-epoch VAL metrics were already written (from eval_test on improve),
+                # keep them as-is and store final-epoch VAL metrics separately.
+                if "val" in obj:
+                    obj.setdefault("extra", {})["val_final"] = final_val
+                else:
+                    obj["val"] = final_val
 
-            obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", static_stats)
-            with open(p, "w") as f:
-                json.dump(obj, f, indent=2)
-            print(f"[VAL] updated {p}")
-        except Exception as e:
-            print(f"[warn] could not append VAL metrics: {e}")
+                obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", static_stats)
+                with open(p, "w") as f:
+                    json.dump(obj, f, indent=2)
+                print(f"[VAL] updated {p}")
+            except Exception as e:
+                print(f"[warn] could not append VAL metrics: {e}")
 
 
+        print("Done.")
+    
 
-    if is_dist(): dist.destroy_process_group()
-    if run_wandb is not None: run_wandb.finish()
+    finally:
+        if run_wandb is not None:
+            try:
+                run_wandb.finish()
+            except Exception:
+                pass
 
-    print("Done.")
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()
