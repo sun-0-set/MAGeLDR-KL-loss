@@ -28,11 +28,11 @@ class JAGeRLoss(nn.Module):
     reassignment: bool = True,
     level_offset: int = 0, 
     λ0: float = 1, # initial value for λ
+    λmin: float | None = None,
     α: float = 2, # initial value for α
     C: float = 1, # initial value for C
-    softplus: bool = False, # whether to use softplus activation
     debug: bool = False,
-    log_to_wandb: bool = False
+    log_to_wandb: bool = False,
     ):
       
       
@@ -70,12 +70,14 @@ class JAGeRLoss(nn.Module):
         raise ValueError("α must be greater than 1.")
       if λ0 <= 0:
         raise ValueError("λ0 must be positive.")
+      if λmin is not None and λmin <= 0.1:
+        raise ValueError("λmin must be greater than 0.1.")
       if K < 4:
         raise ValueError("K must be at least 4.")
       if (reassignment or conf_gating) and not mixture:
         raise ValueError("Competitor reassignment and confidence gating require 'mixture' to be True.")
       
-      self.joint = joint
+      self.joint = joint 
       self.mixture = mixture
       self.reassignment = reassignment
       self.conf_gating = conf_gating
@@ -87,12 +89,12 @@ class JAGeRLoss(nn.Module):
       self.logK = log(K)
       
       self.λ0 = λ0
+      self.λ: torch.Tensor
       self.register_buffer(
         'λ',
         torch.full((self.N,) if joint else (self.N, self.H), λ0, dtype=torch.float64, device=dev)
       )
-      self.α = α
-      self.softplus = softplus
+      self.α = α if λmin is None else λ0 / (λ0 - λmin)
       
       
       if joint:
@@ -103,6 +105,7 @@ class JAGeRLoss(nn.Module):
       if mixture:
         π = _trunc_disc_norm_grid(K)
         self.Kπ_1 = K * π - 1
+        self.ρ: torch.Tensor
         self.register_buffer(
           'ρ',
           torch.zeros((self.N, self.H), dtype=torch.float64, device=dev)
@@ -168,13 +171,14 @@ class JAGeRLoss(nn.Module):
         if dist.is_available() and dist.is_initialized():
           self.level_counts = self.level_counts.to(torch.long)
           dist.all_reduce(self.level_counts, op=dist.ReduceOp.SUM)
+        self.cumul_ρ: torch.Tensor
         self.register_buffer(
           'cumul_ρ',
           torch.zeros_like(self.level_counts, dtype=torch.float64, device=dev)
         )
       
       
-      # Margins according to Cao et al. "Learning Imbalanced Datasets with Label-Distribution-Aware Margin Loss", 2019
+      # LDAM Margins according to Cao et al. "Learning Imbalanced Datasets with Label-Distribution-Aware Margin Loss", 2019
       _base = (
         (_level_comb_counts(self.Y, self.H, K).add(1) if joint else self._level_counts(self.Y, self.H, K))
           .to(torch.float64)
@@ -212,7 +216,7 @@ class JAGeRLoss(nn.Module):
     # Compute raw moments
     k = torch.arange(self.K, dtype=probs.dtype, device=probs.device)
     kk = torch.stack([k**i for i in range(5)], dim=0) 
-    M_raw = torch.tensordot(probs, kk, dims=([-1], [1])) 
+    M_raw = torch.tensordot(probs, kk, dims=([-1], [1]))  # type: ignore[arg-type]
     M_raw = M_raw.movedim(-1, 0)
     var = M_raw[2] - M_raw[1]**2
     skew = M_raw[3] - 3*M_raw[1]*var - M_raw[1]**3
@@ -328,11 +332,10 @@ class JAGeRLoss(nn.Module):
     
     if joint:
       KpowH, HlogK = self.KpowH, self.HlogK
-
-    if self.softplus:
-      y_pred = F.softplus(y_pred)
       
-    y_pred = (F.normalize(y_pred, dim=(1,2), p=1)*KpowH) if joint else (F.normalize(y_pred, dim=2, p=1)*K)
+    y_pred = F.softplus(y_pred)
+      
+    y_pred = (F.normalize(y_pred, dim=(1,2), p=1)*KpowH) if joint else (F.normalize(y_pred, dim=2, p=1)*K)  # type: ignore[arg-type]
     
 
     with torch.no_grad():
@@ -363,8 +366,9 @@ class JAGeRLoss(nn.Module):
       if mixture:
         Kπ_1_pred_max = self.Kπ_1[_mode]
         log_S_h = (ρ.unsqueeze(-1)*Kπ_1_pred_max).log1p() # -self.logK is added as per need
+        _cond: torch.Tensor = _mode < K-_mode  # type: ignore[assignment]
         min_idx = torch.where(
-          _mode < K-_mode,
+          _cond,
           torch.full_like(_mode, K-1),
           torch.zeros_like(_mode)
         ).long()
@@ -476,9 +480,9 @@ class JAGeRLoss(nn.Module):
         if mixture:
           self.ρ[ids] = ρ
           if dist.is_available() and dist.is_initialized():
-            gathered = [None for _ in range(dist.get_world_size())]
+            gathered: list[tuple | None] = [None for _ in range(dist.get_world_size())]
             dist.all_gather_object(gathered, (ids.detach().cpu(), ρ.detach().cpu()))
-            for ids_g, ρ_g in gathered:
+            for ids_g, ρ_g in gathered:  # type: ignore[misc]
               if ids_g is None or len(ids_g) == 0:
                 continue
               self.ρ[ids_g.to(self.ρ.device)] = ρ_g.to(self.ρ.device, dtype=self.ρ.dtype)
@@ -487,7 +491,7 @@ class JAGeRLoss(nn.Module):
 
       
     if self.log_to_wandb and self._wandb_run_active:
-      wandb.log({
+      wandb.log({  # type: ignore[union-attr]
           "jager/lambda_min": float(self.λ.min().item()),
           "jager/lambda_max": float(self.λ.max().item()),
           **({"loss/ρ": float(ρ.detach().mean().item())} if mixture else {})

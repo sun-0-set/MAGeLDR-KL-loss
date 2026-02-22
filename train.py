@@ -5,7 +5,7 @@ from torch import nn, amp
 from torch.utils.data import DataLoader, Subset
 import torch.distributed as dist
 try:
-    from torch.amp import GradScaler as AmpGradScaler
+    from torch.amp.grad_scaler import GradScaler as AmpGradScaler
 except Exception:
     AmpGradScaler = None
 torch.set_float32_matmul_precision("medium")
@@ -181,10 +181,10 @@ def evaluate(model, dl, loss_fn, device, args=None):
             attention_mask = batch["attention_mask"].to(device, non_blocking=pin)
             labels = batch["labels"]
 
-            with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+            with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):  # type: ignore[attr-defined]
                 out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-            y_pred = (out["logits"] if isinstance(out, dict) and "logits" in out else out).to(torch.float64)
+            y_pred = (out["logits"] if isinstance(out, dict) and "logits" in out else out).to(torch.float64)  # type: ignore[union-attr]
 
             try:
                 loss = loss_fn(y_pred, ids, update_state=False)
@@ -228,7 +228,7 @@ def evaluate(model, dl, loss_fn, device, args=None):
 
         minority = list(args.minority_classes[h])  # must be present
         per_class_rec = recall_score(y_t, y_p, labels=label_list, average=None, zero_division=0)
-        mr = [per_class_rec[c - level_offset] for c in minority]
+        mr = [per_class_rec[c - level_offset] for c in minority]  # type: ignore[index]
         tail_recalls.append(float(np.mean(mr)) if mr else float("nan"))
 
     macro_emd = float(sum(emds) / len(emds)) if emds else float("nan")
@@ -290,10 +290,10 @@ def predict_probs_on_loader(model, dl, device):
         }
         out = model(**x)
         logits = out["logits"] if isinstance(out, dict) and "logits" in out else out
-        probs = torch.softmax(logits.float(), dim=-1).detach().cpu()
+        probs = torch.softmax(logits.float(), dim=-1).detach().cpu()  # type: ignore[union-attr]
 
         for h, name in enumerate(head_names):
-            p_lists[name].append(probs[:, h, :])
+            p_lists[name].append(probs[:, h, :])  # type: ignore[index]
 
     ids = torch.cat(all_ids, dim=0).numpy()
     y = {k: torch.cat(v, dim=0).numpy() for k, v in (y_lists or {}).items()}
@@ -307,7 +307,7 @@ def _maybe_init_wandb(args):
     if not _WANDB_OK:
         print("[W&B] wandb not installed; proceeding without logging.")
         return None
-    run = wandb.init(
+    run = wandb.init(  # type: ignore[union-attr]
         project=args.wandb_project,
         entity=args.wandb_entity or None,
         mode=args.wandb_mode,
@@ -325,7 +325,7 @@ def _log_cms_as_wandb_images(cms, split: str, head_names, level_offset: int, ste
         
     if wandb is None or wandb.run is None:
         return
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as plt  # type: ignore[import-not-found]
     if not cms:
         return
     if head_names is None:
@@ -346,7 +346,7 @@ def _log_cms_as_wandb_images(cms, split: str, head_names, level_offset: int, ste
         ax.set_xticklabels(tick_labels); ax.set_yticklabels(tick_labels)
         for i in range(K):
             for j in range(K):
-                ax.text(j, i, int(cm[i, j]), ha="center", va="center", fontsize=8)
+                ax.text(j, i, int(cm[i, j]), ha="center", va="center", fontsize=8)  # type: ignore[arg-type]
         fig.tight_layout()
         wandb.log({f"{split}/cm_{name}": wandb.Image(fig)}, step=step)
         plt.close(fig)
@@ -397,7 +397,7 @@ def main():
                     spec = json.load(_f)
                 to_add = {k: v for k, v in spec.items() if isinstance(v, str)}
                 if to_add:
-                    added = tok.add_special_tokens(to_add)
+                    added = tok.add_special_tokens(to_add)  # type: ignore[arg-type]
         else:
             tok = AutoTokenizer.from_pretrained(
                 args.model_name,
@@ -551,7 +551,7 @@ def main():
 
         try:
             if 'added' in locals() and added:
-                (model.module if is_dist() else model).resize_token_embeddings(len(tok))
+                (model.module if is_dist() else model).resize_token_embeddings(len(tok))  # type: ignore[union-attr]
         except Exception:
             pass
 
@@ -559,7 +559,7 @@ def main():
         def unwrap(m): return m.module if hasattr(m, "module") else m
         if is_main_process():
             base = unwrap(model)
-            enc = base.encoder
+            enc = base.encoder  # type: ignore[union-attr]
             flag = getattr(enc, "is_gradient_checkpointing", None)
             if flag is None:
                 flag = getattr(getattr(enc, "config", object()), "gradient_checkpointing", False)
@@ -574,8 +574,8 @@ def main():
         
         # Head-only warmup
         if args.freeze_encoder:
-            enc = model.module.encoder if is_dist() else model.encoder
-            for p in enc.parameters():
+            enc = model.module.encoder if is_dist() else model.encoder  # type: ignore[union-attr]
+            for p in enc.parameters():  # type: ignore[union-attr]
                 p.requires_grad = False
             if is_main_process():
                 print(">> Encoder frozen (training heads only).")
@@ -591,7 +591,6 @@ def main():
                 conf_gating=bool(args.conf_gating),
                 reassignment=bool(args.reassignment),
                 level_offset=args.level_offset,
-                softplus=True,
                 λ0=args.lambda0,
                 α=args.alpha,
                 C=args.C,
@@ -637,7 +636,7 @@ def main():
                     for h, m in enumerate(v.get("max", [])): flat[f"{k}/max/h{h}"] = m
                 else:
                     flat[f"{k}/mean"] = v["mean"]; flat[f"{k}/min"] = v["min"]; flat[f"{k}/max"] = v["max"]
-            wandb.log(flat, step=0)
+            wandb.log(flat, step=0)  # type: ignore[union-attr]
 
 
 
@@ -646,7 +645,7 @@ def main():
             best_path = os.path.join(args.save_dir, "best.pt")
             assert os.path.exists(best_path), f"Missing {best_path}"
             ckpt = torch.load(best_path, map_location="cpu")
-            (model.module if is_dist() else model).load_state_dict(ckpt["model"])
+            (model.module if is_dist() else model).load_state_dict(ckpt["model"])  # type: ignore[union-attr]
 
             test_loader = None
             if ds_test is not None:
@@ -721,8 +720,8 @@ def main():
                 train_sampler.set_epoch(epoch)
             # Unfreeze at a chosen epoch (for GPU runs)
             if args.unfreeze_at_epoch == epoch:
-                enc = model.module.encoder if is_dist() else model.encoder
-                for p in enc.parameters():
+                enc = model.module.encoder if is_dist() else model.encoder  # type: ignore[union-attr]
+                for p in enc.parameters():  # type: ignore[union-attr]
                     p.requires_grad = True
                 if is_main_process():
                     print(f">> Unfroze encoder at epoch {epoch}.")
@@ -737,11 +736,11 @@ def main():
                 next_accum   = step_in_accum + 1
                 ddp          = (is_dist() and hasattr(model, "no_sync"))
                 sync_needed  = (next_accum % args.grad_accum == 0)
-                sync_ctx     = contextlib.nullcontext() if (not ddp or sync_needed) else model.no_sync()
+                sync_ctx     = contextlib.nullcontext() if (not ddp or sync_needed) else model.no_sync()  # type: ignore[union-attr]
 
                 with sync_ctx:
                     # Autocast forward (bf16 on A100)
-                    with amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                    with amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):  # type: ignore[attr-defined]
                         out = model(input_ids=input_ids, attention_mask=attention_mask)
                     y_pred = out["logits"].to(torch.float64)  # cast up for JAGeR
                     # per-forward state updates in loss; pass 0-based micro-step consistent across ranks
@@ -780,7 +779,7 @@ def main():
                             log_dict["train/lambda_min"] = float(lam_det.min().cpu())
                             log_dict["train/lambda_max"] = float(lam_det.max().cpu())
                         if (global_step % max(1, args.log_every)) == 0:
-                            wandb.log(log_dict, step=global_step)
+                            wandb.log(log_dict, step=global_step)  # type: ignore[union-attr]
                         global_step += 1
 
 
@@ -799,7 +798,7 @@ def main():
             if hasattr(loss_fn, "λ") and isinstance(getattr(loss_fn, "λ", None), torch.Tensor):
                 with torch.no_grad():
                     λ = loss_fn.λ
-                    lam_min = λ.min().item(); lam_max = λ.max().item()
+                    lam_min = λ.min().item(); lam_max = λ.max().item()  # type: ignore[operator]
                 if is_main_process():
                     print(f"[epoch {epoch}] train_loss(avg per step)={running/max(1, math.ceil(len(dl_train)/args.grad_accum)):.4f} "
                             f"lambda[min,max]=[{lam_min:.6f},{lam_max:.6f}]")
@@ -839,7 +838,7 @@ def main():
                         log[f"val/qwk_{name}"] = float(qwks[h])
                         log[f"val/emd_{name}"] = float(emds[h])
                         log[f"val/tail_recall0_{name}"] = float(tail_recalls[h])
-                    wandb.log(log, step=global_step)
+                    wandb.log(log, step=global_step)  # type: ignore[union-attr]
 
                 for h, name in enumerate(head_names):
                     if h >= len(cms):
@@ -886,7 +885,7 @@ def main():
             # ----- save best.pt only if requested -----
             if improved and is_main_process() and args.save_model:
                 path = os.path.join(args.save_dir, "best.pt")
-                to_save = unwrap(model).state_dict()
+                to_save = unwrap(model).state_dict()  # type: ignore[union-attr]
                 os.makedirs(args.save_dir, exist_ok=True)
                 torch.save({
                     "model": to_save,
@@ -904,14 +903,14 @@ def main():
                 print(f"  ↑ saved new best (avgQWK={best_qwk:.4f}) to {path}")
                 if run_wandb is not None:
                     try:
-                        art = wandb.Artifact(
+                        art = wandb.Artifact(  # type: ignore[union-attr]
                             f"best-{args.loss}-j{args.joint}-m{args.mixture}"
                             f"-cg{args.conf_gating}-ra{args.reassignment}",
                             type="model",
                             metadata={"epoch": int(epoch), "best_avg_qwk": float(best_qwk)},
                         )
                         art.add_file(os.path.join(args.save_dir, "best.pt"))
-                        wandb.log_artifact(art)
+                        wandb.log_artifact(art)  # type: ignore[union-attr]
                     except Exception as e:
                         print("[W&B] artifact log skipped:", e)
 
@@ -919,7 +918,7 @@ def main():
                 if args.log_epoch_stats:
                     # union of train/val/(test if present) was built earlier
                     ids = idx_all
-                    row = {"epoch": int(epoch)}
+                    row: dict[str, int | float] = {"epoch": int(epoch)}
                     # λ: JAGeR shape depends on joint/per-head implementation
                     λ = getattr(loss_fn, "λ", None)
                     if isinstance(λ, torch.Tensor):
@@ -958,14 +957,14 @@ def main():
                     if run_wandb is not None:
                         try:
                             stats_path = os.path.join(args.save_dir, "epoch_stats.csv")
-                            art = wandb.Artifact(
+                            art = wandb.Artifact(  # type: ignore[union-attr]
                                 f"epoch-stats-{args.loss}-j{args.joint}-m{args.mixture}"
                                 f"-cg{args.conf_gating}-ra{args.reassignment}",
                                 type="metrics",
                                 metadata={"epoch": int(epoch)}
                             )
                             art.add_file(stats_path)
-                            wandb.log_artifact(art)
+                            wandb.log_artifact(art)  # type: ignore[union-attr]
                         except Exception as e:
                             print("[W&B] epoch-stats artifact log skipped:", e)
 
@@ -976,7 +975,7 @@ def main():
                 best_path = os.path.join(args.save_dir, "best.pt")
                 if args.save_model and os.path.exists(best_path):
                     ckpt = torch.load(best_path, map_location="cpu")
-                    unwrap(model).load_state_dict(ckpt["model"])
+                    unwrap(model).load_state_dict(ckpt["model"])  # type: ignore[union-attr]
                 else:
                     print("[TEST] evaluating current in-memory weights (unsaved best)")
 
@@ -1017,7 +1016,7 @@ def main():
                         log[f"test/qwk_{name}"] = float(tqwks[h])
                         log[f"test/emd_{name}"] = float(temds[h])
                         log[f"test/tail_recall0_{name}"] = float(ttails[h])
-                    wandb.log(log, step=global_step)
+                    wandb.log(log, step=global_step)  # type: ignore[union-attr]
                     # W&B heatmaps for TEST
                     _log_cms_as_wandb_images(tcms, split="test", head_names=head_names, level_offset=level_offset, step=global_step)
 
