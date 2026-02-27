@@ -133,6 +133,7 @@ def parse_args():
     p.add_argument("--reassignment", type=int, default=1,
                    help="JAGeR: enable y_pred_max reassignment term")
     p.add_argument("--lambda0", type=float, default=1.0, help="initial λ (JAGeR)")
+    p.add_argument("--lambda_min", type=float, help="minimum λ (JAGeR); overrides alpha if set")
     p.add_argument("--alpha", type=float, default=2.0, help="α (JAGeR)")
     p.add_argument("--C", type=float, default=1e-1, help="margin C (JAGeR)")
     p.add_argument("--ce_label_smoothing", type=float, default=0.0, help="label smoothing for CE baseline")
@@ -162,6 +163,7 @@ def evaluate(model, dl, loss_fn, device, args=None):
     model.eval()
     use_amp = (device.type == "cuda")
     amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+    print(f"Evaluating with amp_dtype={amp_dtype} on device={device} (use_amp={use_amp})")
 
     num_heads = int(args.num_heads)
     K = int(args.K)
@@ -592,6 +594,7 @@ def main():
                 reassignment=bool(args.reassignment),
                 level_offset=args.level_offset,
                 λ0=args.lambda0,
+                λmin=getattr(args, "lambda_min", None),
                 α=args.alpha,
                 C=args.C,
                 log_to_wandb=bool(getattr(args, "wandb", False)),

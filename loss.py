@@ -31,7 +31,7 @@ class JAGeRLoss(nn.Module):
     λmin: float | None = None,
     α: float = 2, # initial value for α
     C: float = 1, # initial value for C
-    debug: bool = False,
+    debug: bool = True,
     log_to_wandb: bool = False,
     ):
       
@@ -339,8 +339,7 @@ class JAGeRLoss(nn.Module):
     
 
     with torch.no_grad():
-      head_scores = y_pred / (λ[..., None, None] if joint else λ[..., None]) 
-      log_p_h = head_scores.log_softmax(dim=2)
+      log_p_h = (y_pred / (λ[..., None, None] if joint else λ[..., None])).log_softmax(dim=2)
       p_h = log_p_h.exp() 
 
       if mixture:
@@ -390,6 +389,24 @@ class JAGeRLoss(nn.Module):
             p_h.take_along_dim(_mode.unsqueeze(-1), 2).squeeze(-1) *
             (log_S_h.take_along_dim(_mode.unsqueeze(-1), 2).squeeze(-1) - log_S_min)
           )
+          if self._debug and (u_bound.isnan().any() or u_bound.less(0).any() or kl_div.isnan().any() or kl_div.less(0).any()):
+            print("Debug Info:")
+            print(f"log_p_h: {log_p_h}")
+            print(f"log_S_h: {log_S_h}")
+            print(f"log_S_min: {log_S_min}")
+            print(f"p_h: {p_h}")
+            print(f"kl_div: {kl_div}")
+            print(f"u_bound: {u_bound}")
+            raise ValueError("Negative or NaN kl_div or u_bound encountered. See debug info for details.")
+          if self._debug and kl_div.gt(u_bound+self._eps).any():
+            print("Debug Info:")
+            print(f"log_p_h: {log_p_h}")
+            print(f"log_S_h: {log_S_h}")
+            print(f"log_S_min: {log_S_min}")
+            print(f"p_h: {p_h}")
+            print(f"kl_div: {kl_div}")
+            print(f"u_bound: {u_bound}")
+            raise ValueError("kl_div exceeds u_bound. See debug info for details.")
       else: 
         kl_div = (p_h * (log_p_h + logK)).sum(dim=2)
         if joint:
@@ -398,8 +415,16 @@ class JAGeRLoss(nn.Module):
         else:
           u_bound = logK
 
+
       λt = λ0 * (1 - kl_div / (α * u_bound))
-      λ_reg_loss = -.5*α*u_bound * (λt - λ0).square() / λ0
+      if self._debug and ((λt + self._eps < λ0*(1 - 1/α)).any() or λt.isnan().any()):
+        print("Debug Info:")
+        print(f"kl_div: {kl_div}")
+        print(f"u_bound: {u_bound}")
+        print(f"λt: {λt + self._eps:.15f}")
+        print(f"Expected λt range: [{λ0*(1 - 1/α):.15f}, {λ0}]")
+        raise ValueError("λt out of expected range or NaN. See debug info for details.")
+      λ_reg_loss = .5*α*u_bound * (λt - λ0).square() / λ0
 
       
       # competitor assignment
@@ -460,6 +485,14 @@ class JAGeRLoss(nn.Module):
       diff_logits_lam_fix = diff_logits_lam_fix + (joint_log_υ if joint else log_υ_h)
     logsumexp = diff_logits_lam_fix.logsumexp(-1)
     loss_lam_fix = λt * logsumexp + λ_reg_loss
+    if self._debug and loss_lam_fix.less(0).any() or loss_lam_fix.isnan().any():
+      print("Debug Info:")
+      print(f"λt: {λt}")
+      print(f"diff_logits_lam_fix: {diff_logits_lam_fix}")
+      print(f"logsumexp: {logsumexp}")
+      print(f"λ_reg_loss: {λ_reg_loss}")
+      print(f"loss_lam_fix: {loss_lam_fix}")
+      raise ValueError("Negative or NaN loss encountered. See debug info for details.")
     
     if update_state:
       with torch.no_grad():

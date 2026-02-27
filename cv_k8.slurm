@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=5
 #SBATCH --mem=48G
 #SBATCH --time=28:00:00
-#SBATCH --array=0-5
+#SBATCH --array=0
 #SBATCH --output=slurm_logs/jager_ela_cv_k8_alpha3_lam1.25.out
 #SBATCH --error=slurm_logs/jager_ela_cv_k8_alpha3_lam1.25.err
 #SBATCH --mail-type=END					    	# Send a notification email when the job is done (=END)
@@ -25,7 +25,7 @@ fi
 eval "$(conda shell.bash hook)"
 
 # Activate the env
-conda activate jager-cv-k8
+conda activate jager-cv
 
 echo "[info] which python: $(which python)"
 echo "[info] which torchrun: $(which torchrun)"
@@ -72,18 +72,18 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_SHOW_CPP_STACKTRACES=1
 
 JOBS=(
-  "ce"
-  "ce --ce_label_smoothing 0.1"
-  "jager --joint 0 --mixture 0 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  "jager --joint 1 --mixture 0 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
+  # "ce"
+  # "ce --ce_label_smoothing 0.1"
+  # "jager --joint 0 --mixture 0 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
+  # "jager --joint 1 --mixture 0 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
   # "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
   # "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 0 --lambda0 3 --alpha 1.25"
   # "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 1 --lambda0 3 --alpha 1.25"
-  # "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 1 --lambda0 3 --alpha 1.25"
-  "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 0 --lambda0 3 --alpha 1.25"
-  "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 1 --lambda0 3 --alpha 1.25"
-  "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 1 --lambda0 3 --alpha 1.25"
+  "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 1 --lambda0 3 --alpha 1.25"
+  # "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
+  # "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 0 --lambda0 3 --alpha 1.25"
+  # "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 1 --lambda0 3 --alpha 1.25"
+  # "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 1 --lambda0 3 --alpha 1.25"
 )
 
 # ---- Fold selection (one fold per array task) -------------------------------
