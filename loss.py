@@ -418,11 +418,12 @@ class JAGeRLoss(nn.Module):
 
       λt = λ0 * (1 - kl_div / (α * u_bound))
       if self._debug and ((λt + self._eps < λ0*(1 - 1/α)).any() or λt.isnan().any()):
+        torch.set_printoptions(precision=15, sci_mode=False)
         print("Debug Info:")
         print(f"kl_div: {kl_div}")
         print(f"u_bound: {u_bound}")
-        print(f"λt: {λt + self._eps:.15f}")
-        print(f"Expected λt range: [{λ0*(1 - 1/α):.15f}, {λ0}]")
+        print(f"λt: {λt + self._eps}")
+        print(f"Expected λt range: [{λ0*(1 - 1/α)}, {λ0}]")
         raise ValueError("λt out of expected range or NaN. See debug info for details.")
       λ_reg_loss = .5*α*u_bound * (λt - λ0).square() / λ0
 
