@@ -1,18 +1,17 @@
 #!/bin/bash -l
 #SBATCH -p a100 
-##_SBATCH --job-name=jager_dress_cv_k6_40ep_b8_alpha3_lam1.25
-#SBATCH --job-name=jager_dress_cv_k6_debug_jager0100
+#SBATCH --job-name=jager_dress_cv_k6_40ep_b8_lam0_3_lam_min_1_fixed_ref_noflip
+## SBATCH --job-name=jager_dress_cv_k6_jager0100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=44G
-#SBATCH --time=00:30:00
-#SBATCH --array=0
-#SBATCH --output=../slurm_logs/jager_dress_cv_k6_debug_jager0100.out
-#SBATCH --error=../slurm_logs/jager_dress_cv_k6_debug_jager0100.err
-#SBATCH --mail-type=END					    	# Send a notification email when the job is done (=END)
-#SBATCH --mail-type=FAIL   					# Send a notification email when the job fails (=FAIL)
+#SBATCH --time=04:30:00
+#SBATCH --array=0-5
+#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep_b8_lam0_3_lam_min_1_fixed_ref_noflip.out
+#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep_b8_lam0_3_lam_min_1_fixed_ref_noflip.err
+#SBATCH --mail-type=ALL
 #SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au  	# Email to which notifications will be sent
 
 # ---- Environment (conda) ---------------------------------------------------
@@ -65,7 +64,7 @@ MAXLEN=808
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
         --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
-        --use_fast_tokenizer 1 --num_workers 4 --prefetch_factor 4
+        --use_fast_tokenizer --num_workers 4 --prefetch_factor 4
         --ens_t "$T" --ens_stride 1 --log_epoch_stats)
 
 export OMP_NUM_THREADS=4
@@ -75,16 +74,16 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 JOBS=(
   # "ce"
   # "ce --ce_label_smoothing 0.1"
-  # "jager --joint 0 --mixture 0 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 0 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 1 --lambda0 3 --alpha 1.25"
-  # "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 1 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 1 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 1 --lambda0 3 --alpha 1.25"
+  "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
+  "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
+  "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
+  "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
+  "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 1"
+  "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
+  "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
+  "jager --joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 1"
+  "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 1"
 )
 
 # ---- Fold selection (one fold per array task) -------------------------------

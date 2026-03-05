@@ -97,8 +97,8 @@ def parse_args():
     p.add_argument("--model_name", default="microsoft/deberta-v3-large")
     p.add_argument("--hf_offline", action="store_true",
                    help="Force offline mode and local files only for HF")
-    p.add_argument("--use_fast_tokenizer", type=int, default=1,
-                   help="1=fast tokenizer, 0=slow (SentencePiece)")
+    p.add_argument("--use_fast_tokenizer", action=argparse.BooleanOptionalAction, default=True,
+                   help="Use fast tokenizer (--no-use_fast_tokenizer for slow/SentencePiece)")
     p.add_argument("--max_length", type=int, default=1024)
     p.add_argument("--pad_to_multiple_of", type=int, default=8, help="dynamic padding grid")
 
@@ -116,7 +116,7 @@ def parse_args():
     p.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
     p.add_argument("--grad_ckpt", action="store_true",
                    help="Enable gradient checkpointing for the encoder")
-    p.add_argument("--freeze_encoder", action="store_true", help="train heads only (faster on CPU)")
+    p.add_argument("--freeze_encoder", action="store_true", help="train heads only")
     p.add_argument("--unfreeze_at_epoch", type=int, default=-1, help="-1 = never unfreeze in this run")
     p.add_argument("--log_every", type=int, default=50, help="Log training stats every N optimizer steps")
     p.add_argument("--save_model", action="store_true", help="Save best.pt (OFF by default; turn on for finalist runs).")
@@ -124,13 +124,13 @@ def parse_args():
     # --- Loss family / hyperparameters --------------------------------
     p.add_argument("--loss", choices=["jager", "ce"], default="jager",
                    help="jager = JAGeR, ce = cross-entropy")
-    p.add_argument("--joint", type=int, default=1,
-                   help="JAGeR: 1 = use joint K^H space; 0 = per-head")
-    p.add_argument("--mixture", type=int, default=1,
+    p.add_argument("--joint", action=argparse.BooleanOptionalAction, default=True,
+                   help="JAGeR: use joint K^H space (--no-joint for per-head)")
+    p.add_argument("--mixture", action=argparse.BooleanOptionalAction, default=True,
                    help="JAGeR: enable mixture prior / ρ estimation")
-    p.add_argument("--conf_gating", type=int, default=1,
+    p.add_argument("--conf_gating", action=argparse.BooleanOptionalAction, default=True,
                    help="JAGeR: enable confidence-gated ρ update")
-    p.add_argument("--reassignment", type=int, default=1,
+    p.add_argument("--reassignment", action=argparse.BooleanOptionalAction, default=True,
                    help="JAGeR: enable y_pred_max reassignment term")
     p.add_argument("--lambda0", type=float, default=1.0, help="initial λ (JAGeR)")
     p.add_argument("--lambda_min", type=float, help="minimum λ (JAGeR); overrides alpha if set")
@@ -313,11 +313,12 @@ def _maybe_init_wandb(args):
         project=args.wandb_project,
         entity=args.wandb_entity or None,
         mode=args.wandb_mode,
-        name=f"{args.loss}-j{args.joint}-m{args.mixture}-cg{args.conf_gating}-ra{args.reassignment}"
+        name=f"{args.loss}-j{int(args.joint)}-m{int(args.mixture)}-cg{int(args.conf_gating)}-ra{int(args.reassignment)}"
              f"-bs{args.batch_size}-ga{args.grad_accum}",
         tags=[args.loss,
-              f"joint={args.joint}", f"mixture={args.mixture}",
-              f"conf_gating={args.conf_gating}", f"reassign={args.reassignment}"],
+              f"joint={int(args.joint)}", f"mixture={int(args.mixture)}",
+              f"conf_gating={int(args.conf_gating)}", f"reassign={int(args.reassignment)}"],
+
         config=vars(args),
     )
     return run
@@ -358,9 +359,9 @@ def main():
     args = parse_args()
     
     # Force-safe flags when mixture=0
-    if args.loss == "jager" and int(args.mixture) == 0:
-        args.conf_gating = 0
-        args.reassignment = 0
+    if args.loss == "jager" and not args.mixture:
+        args.conf_gating = False
+        args.reassignment = False
 
     if os.path.sep in args.model_name or args.model_name.startswith("."):
         args.model_name = os.path.abspath(os.path.expanduser(args.model_name))
@@ -907,8 +908,8 @@ def main():
                 if run_wandb is not None:
                     try:
                         art = wandb.Artifact(  # type: ignore[union-attr]
-                            f"best-{args.loss}-j{args.joint}-m{args.mixture}"
-                            f"-cg{args.conf_gating}-ra{args.reassignment}",
+                            f"best-{args.loss}-j{int(args.joint)}-m{int(args.mixture)}"
+                            f"-cg{int(args.conf_gating)}-ra{int(args.reassignment)}",
                             type="model",
                             metadata={"epoch": int(epoch), "best_avg_qwk": float(best_qwk)},
                         )
@@ -961,8 +962,8 @@ def main():
                         try:
                             stats_path = os.path.join(args.save_dir, "epoch_stats.csv")
                             art = wandb.Artifact(  # type: ignore[union-attr]
-                                f"epoch-stats-{args.loss}-j{args.joint}-m{args.mixture}"
-                                f"-cg{args.conf_gating}-ra{args.reassignment}",
+                                f"epoch-stats-{args.loss}-j{int(args.joint)}-m{int(args.mixture)}"
+                                f"-cg{int(args.conf_gating)}-ra{int(args.reassignment)}",
                                 type="metrics",
                                 metadata={"epoch": int(epoch)}
                             )

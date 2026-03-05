@@ -21,7 +21,7 @@ MAXLEN=1024
 
 COMMON=(--tsv "$TSV" --model_name "$MODEL" --max_length "$MAXLEN"
         --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
-        --use_fast_tokenizer 1 --num_workers 4 --prefetch_factor 4
+        --use_fast_tokenizer --num_workers 4 --prefetch_factor 4
         --ens_t "$T" --ens_stride 1 --log_epoch_stats)
 
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
@@ -30,16 +30,16 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 JOBS=(
   "ce"
   "ce --ce_label_smoothing 0.1"
-  "jager --joint 0 --mixture 0 --conf_gating 0 --reassignment 0"
-  "jager --joint 1 --mixture 0 --conf_gating 0 --reassignment 0"
-  "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 0"
-  "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 0"
-  "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 1"
-  "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 1"
-  "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 0"
-  "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 0"
-  "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 1"
-  "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 1"
+  "jager --no-joint --no-mixture --no-conf_gating --no-reassignment"
+  "jager --joint --no-mixture --no-conf_gating --no-reassignment"
+  "jager --no-joint --mixture --no-conf_gating --no-reassignment"
+  "jager --no-joint --mixture --conf_gating --no-reassignment"
+  "jager --no-joint --mixture --no-conf_gating --reassignment"
+  "jager --no-joint --mixture --conf_gating --reassignment"
+  "jager --joint --mixture --no-conf_gating --no-reassignment"
+  "jager --joint --mixture --conf_gating --no-reassignment"
+  "jager --joint --mixture --no-conf_gating --reassignment"
+  "jager --joint --mixture --conf_gating --reassignment"
 )
 
 echo "[check] SPLITS_DIR=$SPLITS_DIR"

@@ -64,7 +64,7 @@ MAXLEN=1024
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
         --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
-        --use_fast_tokenizer 1 --num_workers 4 --prefetch_factor 4
+        --use_fast_tokenizer --num_workers 4 --prefetch_factor 4
         --ens_t "$T" --ens_stride 1 --log_epoch_stats)
 
 export OMP_NUM_THREADS=4
@@ -74,16 +74,16 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 JOBS=(
   # "ce"
   # "ce --ce_label_smoothing 0.1"
-  # "jager --joint 0 --mixture 0 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 0 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 0 --mixture 1 --conf_gating 0 --reassignment 1 --lambda0 3 --alpha 1.25"
-  "jager --joint 0 --mixture 1 --conf_gating 1 --reassignment 1 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 0 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 1 --conf_gating 0 --reassignment 1 --lambda0 3 --alpha 1.25"
-  # "jager --joint 1 --mixture 1 --conf_gating 1 --reassignment 1 --lambda0 3 --alpha 1.25"
+  # "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
+  # "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
+  # "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
+  # "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 3 --alpha 1.25"
+  "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --alpha 1.25"
+  # "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
+  # "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
+  # "jager --joint --mixture --no-conf_gating --reassignment --lambda0 3 --alpha 1.25"
+  # "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --alpha 1.25"
 )
 
 # ---- Fold selection (one fold per array task) -------------------------------

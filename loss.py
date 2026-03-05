@@ -28,23 +28,18 @@ class JAGeRLoss(nn.Module):
     reassignment: bool = True,
     level_offset: int = 0, 
     λ0: float = 1, # initial value for λ
-    λmin: float | None = None,
-    α: float = 2, # initial value for α
-    C: float = 1, # initial value for C
+    λmin: float | None = None, # overrides α
+    α: float = 2,
+    C: float = 1,
     debug: bool = True,
     log_to_wandb: bool = False,
     ):
       
       
       def _trunc_disc_norm_grid(K):
-        SD_φ: tuple = (0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486) # precomputed .5/φ(K)^2 for K=4..10; for K>10 approximate with .5
-        _kk = torch.arange(K, device=dev, dtype=torch.float64).tile((K,1))
-        return (
-          (_kk - _kk.T).tile(K,1,1).permute(2,1,0) * (
-            (_kk + _kk.T).tile(K,1,1).permute(2,1,0) * (SD_φ[K-4] if K<=10 else .5) -\
-            _kk.tile(K,1,1)
-          )
-        ).exp_().sum(1).reciprocal_().T
+        φ_sq_inv_halved: tuple = (0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486) # precomputed .5/φ(K)^2 for K=4..10; for K>10 approximate with .5
+        k = torch.arange(K, device=dev, dtype=torch.float64)
+        return F.softmax(-(φ_sq_inv_halved[K-4] if K<=10 else .5) * (k[:,None] - k).square(), dim=1)
           
           
       def _level_comb_counts(Y, H, K):
@@ -64,7 +59,7 @@ class JAGeRLoss(nn.Module):
 
       import os
       self._debug = debug or os.environ.get("JAGeR_DEBUG", "0") == "1"
-      self._eps = 1e-12
+      self._eps = 1e-8
 
       if α <= 1:
         raise ValueError("α must be greater than 1.")
@@ -196,8 +191,7 @@ class JAGeRLoss(nn.Module):
 
   def _level_counts(self, Y, H, K):
     counts = torch.zeros((H, K), dtype=torch.long, device=Y.device)
-    for h in range(H):
-      counts[h] = torch.bincount(Y[:, h], minlength=K)
+    counts.scatter_add_(1, Y.T, torch.ones_like(Y.T))
     return counts  
 
 
@@ -215,7 +209,7 @@ class JAGeRLoss(nn.Module):
   def _cent_moments(self, probs):
     # Compute raw moments
     k = torch.arange(self.K, dtype=probs.dtype, device=probs.device)
-    kk = torch.stack([k**i for i in range(5)], dim=0) 
+    kk = k.pow(torch.arange(5, device=k.device, dtype=k.dtype).unsqueeze(1))
     M_raw = torch.tensordot(probs, kk, dims=([-1], [1]))  # type: ignore[arg-type]
     M_raw = M_raw.movedim(-1, 0)
     var = M_raw[2] - M_raw[1]**2
@@ -350,8 +344,8 @@ class JAGeRLoss(nn.Module):
       if conf_gating:
         # ρ gated update 
         level_counts_B = self._level_counts(Y, H, K)  # (H,K), local batch counts
-        cumul_ρ_B = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
-        cumul_ρ_B.scatter_add_(1, Y.T.to(self.cumul_ρ.device), self.ρ[ids].T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
+        cumul_ρ_B = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype)
+        cumul_ρ_B.scatter_add_(1, Y.T, self.ρ[ids].T.to(dtype=self.cumul_ρ.dtype))
         cumul_ρ = self.cumul_ρ - cumul_ρ_B
         mean_ρ_without_B_full = cumul_ρ / (self.level_counts - level_counts_B + 1)  # (H,K)
         mean_ρ_without_B = mean_ρ_without_B_full.gather(1, Y.T).T  # (B,H)
@@ -364,7 +358,7 @@ class JAGeRLoss(nn.Module):
       # λ update
       if mixture:
         Kπ_1_pred_max = self.Kπ_1[_mode]
-        log_S_h = (ρ.unsqueeze(-1)*Kπ_1_pred_max).log1p() # -self.logK is added as per need
+        log_S_h = (ρ.unsqueeze(-1)*Kπ_1_pred_max).log1p() # logK is subtracted as per need
         _cond: torch.Tensor = _mode < K-_mode  # type: ignore[assignment]
         min_idx = torch.where(
           _cond,
@@ -390,6 +384,7 @@ class JAGeRLoss(nn.Module):
             (log_S_h.take_along_dim(_mode.unsqueeze(-1), 2).squeeze(-1) - log_S_min)
           )
           if self._debug and (u_bound.isnan().any() or u_bound.less(0).any() or kl_div.isnan().any() or kl_div.less(0).any()):
+            torch.set_printoptions(precision=15, sci_mode=False)
             print("Debug Info:")
             print(f"log_p_h: {log_p_h}")
             print(f"log_S_h: {log_S_h}")
@@ -399,6 +394,7 @@ class JAGeRLoss(nn.Module):
             print(f"u_bound: {u_bound}")
             raise ValueError("Negative or NaN kl_div or u_bound encountered. See debug info for details.")
           if self._debug and kl_div.gt(u_bound+self._eps).any():
+            torch.set_printoptions(precision=15, sci_mode=False)
             print("Debug Info:")
             print(f"log_p_h: {log_p_h}")
             print(f"log_S_h: {log_S_h}")
@@ -425,7 +421,7 @@ class JAGeRLoss(nn.Module):
         print(f"λt: {λt + self._eps}")
         print(f"Expected λt range: [{λ0*(1 - 1/α)}, {λ0}]")
         raise ValueError("λt out of expected range or NaN. See debug info for details.")
-      λ_reg_loss = .5*α*u_bound * (λt - λ0).square() / λ0
+      λ_reg_loss = -.5*α*u_bound * (λt - λ0).square() / λ0
 
       
       # competitor assignment
@@ -486,7 +482,8 @@ class JAGeRLoss(nn.Module):
       diff_logits_lam_fix = diff_logits_lam_fix + (joint_log_υ if joint else log_υ_h)
     logsumexp = diff_logits_lam_fix.logsumexp(-1)
     loss_lam_fix = λt * logsumexp + λ_reg_loss
-    if self._debug and loss_lam_fix.less(0).any() or loss_lam_fix.isnan().any():
+    if self._debug and (loss_lam_fix.less(0).any() or loss_lam_fix.isnan().any()):
+      torch.set_printoptions(precision=15, sci_mode=False)
       print("Debug Info:")
       print(f"λt: {λt}")
       print(f"diff_logits_lam_fix: {diff_logits_lam_fix}")
@@ -498,13 +495,10 @@ class JAGeRLoss(nn.Module):
     if update_state:
       with torch.no_grad():
         if conf_gating:
-          cumul_ρ_B_old = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
-          cumul_ρ_B_old.scatter_add_(1, Y.T.to(self.cumul_ρ.device), self.ρ[ids].T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
+          cumul_ρ_B_new = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype)
+          cumul_ρ_B_new.scatter_add_(1, Y.T, ρ.T.to(dtype=self.cumul_ρ.dtype))
 
-          cumul_ρ_B_new = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype, device=self.cumul_ρ.device)
-          cumul_ρ_B_new.scatter_add_(1, Y.T.to(self.cumul_ρ.device), ρ.T.to(self.cumul_ρ.device, dtype=self.cumul_ρ.dtype))
-
-          delta = cumul_ρ_B_new - cumul_ρ_B_old
+          delta = cumul_ρ_B_new - cumul_ρ_B  # reuse cumul_ρ_B from forward path
 
           if dist.is_available() and dist.is_initialized():
               dist.all_reduce(delta, op=dist.ReduceOp.SUM)
