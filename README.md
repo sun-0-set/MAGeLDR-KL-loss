@@ -1,4 +1,4 @@
-## MAGe‑LDR‑KL
+## JAGeR Loss
 
 3‑head DeBERTa-v3-large for Content/Organization/Language (5 classes each). Losses: MAGe‑LDR-KL (mixture/uniform), ALDR‑KL, CE.
 
