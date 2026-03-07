@@ -804,8 +804,10 @@ def main():
                     λ = loss_fn.λ
                     lam_min = λ.min().item(); lam_max = λ.max().item()  # type: ignore[operator]
                 if is_main_process():
+                    lam_reg = getattr(loss_fn, '_last_lambda_reg', None)
+                    lam_reg_str = f" lambda_reg={lam_reg:.6f}" if lam_reg is not None else ""
                     print(f"[epoch {epoch}] train_loss(avg per step)={running/max(1, math.ceil(len(dl_train)/args.grad_accum)):.4f} "
-                            f"lambda[min,max]=[{lam_min:.6f},{lam_max:.6f}]")
+                            f"lambda[min,max]=[{lam_min:.6f},{lam_max:.6f}]{lam_reg_str}")
 
             # Evaluate on rank 0 only
             if is_main_process():

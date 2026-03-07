@@ -175,18 +175,13 @@ class JAGeRLoss(nn.Module):
       
       # LDAM Margins according to Cao et al. "Learning Imbalanced Datasets with Label-Distribution-Aware Margin Loss", 2019
       _base = (
-        (_level_comb_counts(self.Y, self.H, K).add(1) if joint else self._level_counts(self.Y, self.H, K))
+        (_level_comb_counts(self.Y, self.H, K).add(1) if joint else (self.level_counts if conf_gating else self._level_counts(self.Y, self.H, K)))
           .to(torch.float64)
           .rsqrt().sqrt()
           .mul(C)
       )
-      self.thresholds = (
-        _base
-          .unsqueeze(0)
-          .expand(self.N, *_base.shape)
-          .contiguous()
-          .to(dev)
-      )
+      self._base_thresholds: torch.Tensor
+      self.register_buffer('_base_thresholds', _base.to(dev))
 
 
   def _level_counts(self, Y, H, K):
@@ -234,6 +229,7 @@ class JAGeRLoss(nn.Module):
   def _estimate_ρ(self, ν, β2, probs):
 
     ν = ν.long()
+    β2 = β2.clamp_min(self._eps)
 
     # Gather per-ν constants (broadcast to (B, H))
     msk = self.eq_m1[ν]
@@ -247,9 +243,10 @@ class JAGeRLoss(nn.Module):
 
     ρ = torch.empty_like(ν, dtype=torch.float64)  # Initialize ρ tensor
 
+
     # Case 1: equal mean (quadratic)
-    b = δK[msk] / (2 * δv[msk].square() * β2[msk].clamp_min(1e-12))
-    D = (b.square() + (Ku[msk] - δK[msk]*ρ0[msk]) / (δv[msk].square() * β2[msk].clamp_min(1e-12))).clamp_min(0).sqrt()
+    b = δK[msk] / (2 * δv[msk].square() * β2[msk])
+    D = (b.square() + (Ku[msk] - δK[msk]*ρ0[msk]) / (δv[msk].square() * β2[msk])).clamp_min(0).sqrt()
     kurt_quad_roots = (b - ρ0[msk]).unsqueeze(-1) + torch.stack((-D, D), dim=1)  # (M,2)
     kurt_quad_roots = kurt_quad_roots.clamp(0, 1)
     
@@ -261,56 +258,63 @@ class JAGeRLoss(nn.Module):
     ρ[msk] = kurt_quad_roots.gather(1, idx.unsqueeze(-1)).squeeze(-1)
 
 
-    # Case 2: general (quartic)
-    coef_K0 = self.coef_K[0][ν]
-    coef_K1 = self.coef_K[1][ν]
-    coef_K2 = self.coef_K[2][ν]
-    _13rd = self._13rd
-    _cbrt = self._cbrt
-    
-    den = 1 + β2.clamp_min(1e-12) * _13rd
-    p = -(coef_K2 - 2 * β2.clamp_min(1e-12) * r0 * _13rd) * 0.5 / den
-    q = (coef_K1 * 0.5) / den
-    r = -(coef_K0 + β2.clamp_min(1e-12) * r0.square() * _13rd) / den
+    # Case 2: general (quartic) — only compute for ~msk elements
+    nmsk = ~msk
+    if nmsk.any():
+      coef_K0 = self.coef_K[0][ν][nmsk]
+      coef_K1 = self.coef_K[1][ν][nmsk]
+      coef_K2 = self.coef_K[2][ν][nmsk]
+      β2_n = β2[nmsk]
+      r0_n = r0[nmsk]
+      ρ0_n = ρ0[nmsk]
+      Kπ_1_n = Kπ_1[nmsk]
+      probs_n = probs[nmsk]
+      _13rd = self._13rd
+      _cbrt = self._cbrt
+      
+      den = 1 + β2_n * _13rd
+      p = -(coef_K2 - 2 * β2_n * r0_n * _13rd) * 0.5 / den
+      q = (coef_K1 * 0.5) / den
+      r = -(coef_K0 + β2_n * r0_n.square() * _13rd) / den
 
-    p13 = p * _13rd
-    p2 = p13 * p13
-    f = r * _13rd - p2
-    g = p13 * (2 * p2 - r) + p * r - 0.5 * q.square()
-    h = 0.25 * g.square() + f * f * f
+      p13 = p * _13rd
+      p2 = p13 * p13
+      f = r * _13rd - p2
+      g = p13 * (2 * p2 - r) + p * r - 0.5 * q.square()
+      h = 0.25 * g.square() + f * f * f
 
-    mask_h = h <= 0
-    # h <= 0 branch
-    l = f.abs().sqrt()
-    acos_arg = torch.clamp(0.5 * g / (f * l), -1.0, 1.0)
-    m_res = (acos_arg.acos() * _13rd).cos()
-    cr1 = 2 * l * m_res - p13
-    # h > 0 branch
-    sqrt_h = h.clamp_min(0).sqrt()
-    cr2 = _cbrt(-0.5 * g + sqrt_h) + _cbrt(-0.5 * g - sqrt_h) - p13
-    cr = torch.where(mask_h, cr1, cr2)
+      mask_h = h <= 0
+      # h <= 0 branch
+      l = f.abs().sqrt()
+      acos_arg = torch.clamp(0.5 * g / (f * l), -1.0, 1.0)
+      m_res = (acos_arg.acos() * _13rd).cos()
+      cr1 = 2 * l * m_res - p13
+      # h > 0 branch
+      sqrt_h = h.clamp_min(0).sqrt()
+      cr2 = _cbrt(-0.5 * g + sqrt_h) + _cbrt(-0.5 * g - sqrt_h) - p13
+      cr = torch.where(mask_h, cr1, cr2)
 
-    s = (2 * (p + cr)).clamp_min(0).sqrt()
-    s_nz = s != 0
-    t = torch.empty_like(s)
-    t[s_nz] = -q[s_nz] / s[s_nz]
-    t[~s_nz] = cr[~s_nz] * cr[~s_nz] + r[~s_nz]
-    s = s*.5
+      s = (2 * (p + cr)).clamp_min(0).sqrt()
+      s_nz = s != 0
+      t = torch.empty_like(s)
+      t[s_nz] = -q[s_nz] / s[s_nz]
+      t[~s_nz] = cr[~s_nz] * cr[~s_nz] + r[~s_nz]
+      s = s*.5
 
-    s2 = s.square()
+      s2 = s.square()
 
-    kurt_quart_roots = torch.stack([
-      -s - (s2 - cr - t).clamp_min(0).sqrt(),
-      -s + (s2 - cr - t).clamp_min(0).sqrt(),
-      s - (s2 - cr + t).clamp_min(0).sqrt(),
-      s + (s2 - cr + t).clamp_min(0).sqrt()
-    ], dim=-1) + ρ0.unsqueeze(-1) 
-    kurt_quart_roots = kurt_quart_roots.clamp(0, 1)
+      kurt_quart_roots = torch.stack([
+        -s - (s2 - cr - t).clamp_min(0).sqrt(),
+        -s + (s2 - cr - t).clamp_min(0).sqrt(),
+        s - (s2 - cr + t).clamp_min(0).sqrt(),
+        s + (s2 - cr + t).clamp_min(0).sqrt()
+      ], dim=-1) + ρ0_n.unsqueeze(-1) 
+      kurt_quart_roots = kurt_quart_roots.clamp(0, 1)
 
-    log_υ_roots = (kurt_quart_roots.unsqueeze(-1) * Kπ_1.unsqueeze(-2)).log1p() - logK  
-    ce = self._ce(probs.unsqueeze(-2), log_υ_roots)
-    idx = ce.argmin(dim=-1)  
-    ρ[~msk] = kurt_quart_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)[~msk]
+      log_υ_roots = (kurt_quart_roots.unsqueeze(-1) * Kπ_1_n.unsqueeze(-2)).log1p() - logK  
+      ce = self._ce(probs_n.unsqueeze(-2), log_υ_roots)
+      idx = ce.argmin(dim=-1)  
+      ρ[nmsk] = kurt_quart_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
 
     return ρ
 
@@ -329,7 +333,7 @@ class JAGeRLoss(nn.Module):
       
     y_pred = F.softplus(y_pred)
       
-    y_pred = (F.normalize(y_pred, dim=(1,2), p=1)*KpowH) if joint else (F.normalize(y_pred, dim=2, p=1)*K)  # type: ignore[arg-type]
+    y_pred = F.normalize(y_pred, dim=(1,2), p=1)*KpowH if joint else F.normalize(y_pred, dim=2, p=1)*K  # type: ignore[arg-type]
     
 
     with torch.no_grad():
@@ -338,6 +342,7 @@ class JAGeRLoss(nn.Module):
 
       if mixture:
         log_p_h_max, _mode = log_p_h.max(dim=2)
+        _mode_unsq = _mode.unsqueeze(-1)
         mean, _var, _skew, _kurt = self._cent_moments(p_h) 
         ρ = self._estimate_ρ(_mode, _kurt / _var.square().clamp_min(self._eps), p_h)
       
@@ -366,6 +371,7 @@ class JAGeRLoss(nn.Module):
           torch.zeros_like(_mode)
         ).long()
         log_S_min = log_S_h.take_along_dim(min_idx.unsqueeze(-1), 2).squeeze(-1)
+        log_S_at_mode = log_S_h.take_along_dim(_mode_unsq, 2)  # (B, H, 1)
         kl_div = (p_h * (log_p_h - log_S_h + logK)).sum(dim=2)
         if joint:
           kl_div = kl_div.sum(dim=1)
@@ -374,14 +380,15 @@ class JAGeRLoss(nn.Module):
             self._ce(p_h, log_p_h).sum(dim=1) +
             log_S_min - HlogK +
             log_p_h_max.sum(dim=1).exp() *
-            (log_S_h.take_along_dim(_mode.unsqueeze(-1), 2).sum(dim=1).squeeze(-1) - log_S_min)
+            (log_S_at_mode.sum(dim=1).squeeze(-1) - log_S_min)
           )
         else:
+          log_S_at_mode_sq = log_S_at_mode.squeeze(-1)  # (B, H)
           u_bound = -(
             self._ce(p_h, log_p_h) +
             log_S_min - logK +
-            p_h.take_along_dim(_mode.unsqueeze(-1), 2).squeeze(-1) *
-            (log_S_h.take_along_dim(_mode.unsqueeze(-1), 2).squeeze(-1) - log_S_min)
+            p_h.take_along_dim(_mode_unsq, 2).squeeze(-1) *
+            (log_S_at_mode_sq - log_S_min)
           )
           if self._debug and (u_bound.isnan().any() or u_bound.less(0).any() or kl_div.isnan().any() or kl_div.less(0).any()):
             torch.set_printoptions(precision=15, sci_mode=False)
@@ -422,7 +429,10 @@ class JAGeRLoss(nn.Module):
         print(f"Expected λt range: [{λ0*(1 - 1/α)}, {λ0}]")
         raise ValueError("λt out of expected range or NaN. See debug info for details.")
       λ_reg_loss = -.5*α*u_bound * (λt - λ0).square() / λ0
+      λt_unsq = λt.unsqueeze(-1)
 
+      if reassignment:
+        ρ_sq = ρ.square()
       
       # competitor assignment
       if mixture:
@@ -433,7 +443,7 @@ class JAGeRLoss(nn.Module):
           joint_log_υ = joint_log_υ.view(B, -1)
       
       
-      thresholds = self.thresholds[ids]
+      thresholds = self._base_thresholds.unsqueeze(0).expand(B, *self._base_thresholds.shape)
       if joint:
         _1hot_label = torch.zeros_like(thresholds, dtype=thresholds.dtype)
         idx_label = (torch.arange(B, device=y_pred.device), *Y.unbind(1))
@@ -447,12 +457,12 @@ class JAGeRLoss(nn.Module):
         _1hot_label = _1hot_label.view(B, -1)
         if reassignment:
           c = (
-            thresholds - (thresholds + λt.unsqueeze(-1)*joint_log_υ).mul(_1hot_label) -
-            (ρ.square().mean(dim=1).unsqueeze(-1) * thresholds + 
-            λt.unsqueeze(-1)*self._outer_sum(ρ.square().unsqueeze(-1)*log_υ_h, flat=False).view(B, -1)).mul(_1hot_pred_max - _1hot_label)
+            thresholds - (thresholds + λt_unsq*joint_log_υ).mul(_1hot_label) -
+            (ρ_sq.mean(dim=1).unsqueeze(-1) * thresholds + 
+            λt_unsq*self._outer_sum(ρ_sq.unsqueeze(-1)*log_υ_h, flat=False).view(B, -1)).mul(_1hot_pred_max - _1hot_label)
           )
         elif mixture:
-          c = thresholds - (thresholds + λt.unsqueeze(-1)*joint_log_υ).mul(_1hot_label)
+          c = thresholds - (thresholds + λt_unsq*joint_log_υ).mul(_1hot_label)
         else:
           c = thresholds - thresholds.mul(_1hot_label)
       else:
@@ -460,12 +470,12 @@ class JAGeRLoss(nn.Module):
         if reassignment:
           _1hot_pred_max = F.one_hot(_mode, K)
           c = (
-            thresholds - (thresholds + λt.unsqueeze(-1)*log_υ_h).mul(_1hot_label) -
-            (ρ.square().unsqueeze(-1) * thresholds + 
-            λt.unsqueeze(-1)*(ρ.square().unsqueeze(-1)*log_υ_h)).mul(_1hot_pred_max - _1hot_label)
+            thresholds - (thresholds + λt_unsq*log_υ_h).mul(_1hot_label) -
+            (ρ_sq.unsqueeze(-1) * thresholds + 
+            λt_unsq*(ρ_sq.unsqueeze(-1)*log_υ_h)).mul(_1hot_pred_max - _1hot_label)
           )
         elif mixture:
-          c = thresholds - (thresholds + λt.unsqueeze(-1)*log_υ_h).mul(_1hot_label)
+          c = thresholds - (thresholds + λt_unsq*log_υ_h).mul(_1hot_label)
         else:
           c = thresholds - thresholds.mul(_1hot_label)
       
@@ -473,24 +483,15 @@ class JAGeRLoss(nn.Module):
     y_label = y_pred.gather(2, Y.unsqueeze(-1))  
     y_pred = y_pred - y_label 
     if reassignment:
-      y_pred = y_pred + ρ.square().unsqueeze(-1) * (y_pred.gather(2, _mode.unsqueeze(-1)) + y_label)
+      y_pred = y_pred + ρ_sq.unsqueeze(-1) * (y_pred.gather(2, _mode_unsq) + y_label)
     if joint: 
       y_pred = self._outer_sum(y_pred, flat=False).view(B, -1) 
     diff_logits = y_pred + c 
-    diff_logits_lam_fix = diff_logits /(λt.unsqueeze(1) if joint else λt.unsqueeze(-1))
+    diff_logits_lam_fix = diff_logits / λt_unsq
     if mixture:
       diff_logits_lam_fix = diff_logits_lam_fix + (joint_log_υ if joint else log_υ_h)
     logsumexp = diff_logits_lam_fix.logsumexp(-1)
-    loss_lam_fix = λt * logsumexp + λ_reg_loss
-    if self._debug and (loss_lam_fix.less(0).any() or loss_lam_fix.isnan().any()):
-      torch.set_printoptions(precision=15, sci_mode=False)
-      print("Debug Info:")
-      print(f"λt: {λt}")
-      print(f"diff_logits_lam_fix: {diff_logits_lam_fix}")
-      print(f"logsumexp: {logsumexp}")
-      print(f"λ_reg_loss: {λ_reg_loss}")
-      print(f"loss_lam_fix: {loss_lam_fix}")
-      raise ValueError("Negative or NaN loss encountered. See debug info for details.")
+    loss_lam_fix = λt * logsumexp
     
     if update_state:
       with torch.no_grad():
@@ -515,13 +516,14 @@ class JAGeRLoss(nn.Module):
                 continue
               self.ρ[ids_g.to(self.ρ.device)] = ρ_g.to(self.ρ.device, dtype=self.ρ.dtype)
         
-        self.λ[ids] = λt.clamp_min(0.0)
-
       
+    self._last_lambda_reg = float(λ_reg_loss.mean().item())
+
     if self.log_to_wandb and self._wandb_run_active:
       wandb.log({  # type: ignore[union-attr]
           "jager/lambda_min": float(self.λ.min().item()),
           "jager/lambda_max": float(self.λ.max().item()),
+          "jager/lambda_reg": self._last_lambda_reg,
           **({"loss/ρ": float(ρ.detach().mean().item())} if mixture else {})
       }, commit=False)
     

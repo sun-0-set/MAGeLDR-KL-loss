@@ -13,7 +13,6 @@ class EssayDataset(Dataset):
 
     - Expects a CSV/TSV with at least ['prompt', 'essay'].
     - All other *numeric* columns are treated as label/response columns.
-      (So keep ids/folds non-numeric if you don't want them as targets.)
     - Labels are assumed to be ordinal integers (e.g. 1..K).
     """
     def __init__(
