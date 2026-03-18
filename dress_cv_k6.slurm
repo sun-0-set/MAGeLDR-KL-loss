@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #SBATCH -p a100 
-#SBATCH --job-name=jager_dress_cv_k6_40ep_b8_lam0_3_lam_min_1_fixed_ref_noflip
+#SBATCH --job-name=jager_dress_cv_k6_40ep
 ## SBATCH --job-name=jager_dress_cv_k6_jager0100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -9,8 +9,8 @@
 #SBATCH --mem=44G
 #SBATCH --time=04:30:00
 #SBATCH --array=0-5
-#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep_b8_lam0_3_lam_min_1_fixed_ref_noflip.out
-#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep_b8_lam0_3_lam_min_1_fixed_ref_noflip.err
+#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep.out
+#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep.err
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au  	# Email to which notifications will be sent
 
@@ -74,16 +74,16 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 JOBS=(
   # "ce"
   # "ce --ce_label_smoothing 0.1"
-  "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
-  "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
-  "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
-  "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
-  "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 1"
-  "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 1"
-  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
-  "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 1"
-  "jager --joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 1"
-  "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 1"
+  "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
 )
 
 # ---- Fold selection (one fold per array task) -------------------------------

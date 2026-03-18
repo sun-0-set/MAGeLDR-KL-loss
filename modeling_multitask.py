@@ -54,6 +54,9 @@ class MultiHeadDeberta(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout and dropout > 0 else nn.Identity()
         self.heads = nn.ModuleList([nn.Linear(hidden, num_classes) for _ in range(num_heads)])
 
+    def resize_token_embeddings(self, new_num_tokens: int):
+        return self.encoder.resize_token_embeddings(new_num_tokens)
+
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         out = self.encoder(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
         pooled = out.last_hidden_state[:, 0]

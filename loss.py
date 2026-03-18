@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 import torch.nn.functional as F
 import torch.distributed as dist
 
@@ -20,8 +19,9 @@ class JAGeRLoss(nn.Module):
     self, 
     Y: torch.Tensor, # true label columns
     K: int, # number of levels
-    def_batch_size: int,
-    steps_per_epoch: int | None = None,  # per-rank micro-batch steps per epoch (len(dl_train)); if None, computed from N/def_batch_size
+    def_batch_size: int, # effective global micro-batch size seen per synchronized forward
+    steps_per_epoch: int | None = None,  # synchronized micro-batch steps per epoch; if None, computed from stats rows / def_batch_size
+    stats_ids: torch.Tensor | None = None, # row ids whose labels define train-only class stats; defaults to all rows
     joint: bool = True,
     mixture: bool = True,
     conf_gating: bool = True,
@@ -34,17 +34,17 @@ class JAGeRLoss(nn.Module):
     debug: bool = True,
     log_to_wandb: bool = False,
     ):
-      
+      device = Y.device
       
       def _trunc_disc_norm_grid(K):
         φ_sq_inv_halved: tuple = (0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486) # precomputed .5/φ(K)^2 for K=4..10; for K>10 approximate with .5
-        k = torch.arange(K, device=dev, dtype=torch.float64)
+        k = torch.arange(K, device=device, dtype=torch.float64)
         return F.softmax(-(φ_sq_inv_halved[K-4] if K<=10 else .5) * (k[:,None] - k).square(), dim=1)
           
           
       def _level_comb_counts(Y, H, K):
-        base = torch.full((H,), K, dtype=torch.long, device=dev)
-        exp = torch.arange(H, dtype=torch.long, device=dev)
+        base = torch.full((H,), K, dtype=torch.long, device=device)
+        exp = torch.arange(H, dtype=torch.long, device=device)
         factors = torch.pow(base, exp)                  # [H] integer powers
         flat_idx = (Y * factors).sum(dim=1)
         counts_flat = torch.bincount(flat_idx, minlength=K**H)
@@ -65,8 +65,8 @@ class JAGeRLoss(nn.Module):
         raise ValueError("α must be greater than 1.")
       if λ0 <= 0:
         raise ValueError("λ0 must be positive.")
-      if λmin is not None and λmin <= 0.1:
-        raise ValueError("λmin must be greater than 0.1.")
+      if not (λmin is None or 0 < λmin < λ0):
+        raise ValueError("λmin must be positive and less than λ0")
       if K < 4:
         raise ValueError("K must be at least 4.")
       if (reassignment or conf_gating) and not mixture:
@@ -77,8 +77,18 @@ class JAGeRLoss(nn.Module):
       self.reassignment = reassignment
       self.conf_gating = conf_gating
       
-      self.Y = (Y - level_offset).long().to(dev)
+      self.Y = (Y - level_offset).long().to(device)
       self.N, self.H = self.Y.shape
+      if stats_ids is None:
+        stats_Y = self.Y
+      else:
+        stats_ids = stats_ids.to(device=device, dtype=torch.long).reshape(-1)
+        if stats_ids.numel() == 0:
+          raise ValueError("stats_ids must be non-empty.")
+        if int(stats_ids.min().item()) < 0 or int(stats_ids.max().item()) >= self.N:
+          raise ValueError("stats_ids contains indices outside the range of Y.")
+        stats_Y = self.Y[stats_ids]
+      self.N_stats = int(stats_Y.shape[0])
       
       self.K = K
       self.logK = log(K)
@@ -87,7 +97,7 @@ class JAGeRLoss(nn.Module):
       self.λ: torch.Tensor
       self.register_buffer(
         'λ',
-        torch.full((self.N,) if joint else (self.N, self.H), λ0, dtype=torch.float64, device=dev)
+        torch.full((self.N,) if joint else (self.N, self.H), λ0, dtype=torch.float64, device=device)
       )
       self.α = α if λmin is None else λ0 / (λ0 - λmin)
       
@@ -103,7 +113,7 @@ class JAGeRLoss(nn.Module):
         self.ρ: torch.Tensor
         self.register_buffer(
           'ρ',
-          torch.zeros((self.N, self.H), dtype=torch.float64, device=dev)
+          torch.zeros((self.N, self.H), dtype=torch.float64, device=device)
         )
         
         #--- Setup for ρ estimation
@@ -120,7 +130,7 @@ class JAGeRLoss(nn.Module):
           (K-1)*(2*K-1)/6,
           (K-1)**2*(K)/4,
           (K-1)*(2*K-1)*(3*(K-1)**2+3*K-4)/30
-        ], dtype=torch.float64, device=dev)
+        ], dtype=torch.float64, device=device)
 
         ### Mean ###
         δm = self.δm = Mn - Mu_raw[1]
@@ -161,27 +171,24 @@ class JAGeRLoss(nn.Module):
       if conf_gating:
         # Mean ρ setup
         self.def_batch_size = def_batch_size
-        self.steps_per_epoch = int(steps_per_epoch) if steps_per_epoch is not None else ceil(self.N / self.def_batch_size)
-        self.level_counts = self._level_counts(self.Y, self.H, K)
-        if dist.is_available() and dist.is_initialized():
-          self.level_counts = self.level_counts.to(torch.long)
-          dist.all_reduce(self.level_counts, op=dist.ReduceOp.SUM)
+        self.steps_per_epoch = int(steps_per_epoch) if steps_per_epoch is not None else ceil(self.N_stats / self.def_batch_size)
+        self.level_counts = self._level_counts(stats_Y, self.H, K).to(torch.long)
         self.cumul_ρ: torch.Tensor
         self.register_buffer(
           'cumul_ρ',
-          torch.zeros_like(self.level_counts, dtype=torch.float64, device=dev)
+          torch.zeros_like(self.level_counts, dtype=torch.float64, device=device)
         )
       
       
       # LDAM Margins according to Cao et al. "Learning Imbalanced Datasets with Label-Distribution-Aware Margin Loss", 2019
       _base = (
-        (_level_comb_counts(self.Y, self.H, K).add(1) if joint else (self.level_counts if conf_gating else self._level_counts(self.Y, self.H, K)))
+        (_level_comb_counts(stats_Y, self.H, K).add(1) if joint else (self.level_counts if conf_gating else self._level_counts(stats_Y, self.H, K)))
           .to(torch.float64)
           .rsqrt().sqrt()
           .mul(C)
       )
       self._base_thresholds: torch.Tensor
-      self.register_buffer('_base_thresholds', _base.to(dev))
+      self.register_buffer('_base_thresholds', _base.to(device))
 
 
   def _level_counts(self, Y, H, K):
@@ -226,7 +233,45 @@ class JAGeRLoss(nn.Module):
   def _ce(self, p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
     return -(p * log_q).sum(dim=-1)
 
-  def _estimate_ρ(self, ν, β2, probs):
+  def _all_gather_equal(self, x: torch.Tensor) -> torch.Tensor:
+    if not (dist.is_available() and dist.is_initialized()):
+      return x
+    gathered = [torch.empty_like(x) for _ in range(dist.get_world_size())]
+    dist.all_gather(gathered, x)
+    return torch.cat(gathered, dim=0)
+
+  def _unique_step_ids(self, ids: torch.Tensor) -> torch.Tensor:
+    ids_all = self._all_gather_equal(ids.detach().to(self.λ.device, dtype=torch.long))
+    return torch.unique(ids_all, sorted=True)
+
+  def _aggregate_state_updates(self, ids: torch.Tensor, λt: torch.Tensor, ρ: torch.Tensor | None = None):
+    ids_all = self._all_gather_equal(ids.detach().to(self.λ.device, dtype=torch.long))
+    λ_all = self._all_gather_equal(λt.detach().to(self.λ.device, dtype=self.λ.dtype))
+    ρ_all = self._all_gather_equal(ρ.detach().to(self.ρ.device, dtype=self.ρ.dtype)) if ρ is not None else None
+
+    unique_ids, inverse = torch.unique(ids_all, sorted=True, return_inverse=True)
+    counts = torch.bincount(inverse, minlength=unique_ids.numel()).to(dtype=self.λ.dtype, device=self.λ.device)
+    count_shape = (counts.shape[0],) + (1,) * max(0, λ_all.dim() - 1)
+
+    λ_sum = torch.zeros((unique_ids.numel(),) + λ_all.shape[1:], dtype=λ_all.dtype, device=λ_all.device)
+    λ_sum.index_add_(0, inverse, λ_all)
+    λ_mean = λ_sum / counts.view(count_shape)
+
+    ρ_mean = None
+    if ρ_all is not None:
+      counts_ρ = counts.to(dtype=self.ρ.dtype, device=self.ρ.device)
+      count_shape_ρ = (counts_ρ.shape[0],) + (1,) * max(0, ρ_all.dim() - 1)
+      ρ_sum = torch.zeros((unique_ids.numel(),) + ρ_all.shape[1:], dtype=ρ_all.dtype, device=ρ_all.device)
+      ρ_sum.index_add_(0, inverse, ρ_all)
+      ρ_mean = ρ_sum / counts_ρ.view(count_shape_ρ)
+
+    return unique_ids, λ_mean, ρ_mean
+
+  def _estimate_ρ_mvar(self, ν, probs):
+    
+    pass
+
+  def _estimate_ρ_uvar(self, ν, β2, probs):
 
     ν = ν.long()
     β2 = β2.clamp_min(self._eps)
@@ -273,20 +318,20 @@ class JAGeRLoss(nn.Module):
       _cbrt = self._cbrt
       
       den = 1 + β2_n * _13rd
-      p = -(coef_K2 - 2 * β2_n * r0_n * _13rd) * 0.5 / den
-      q = (coef_K1 * 0.5) / den
+      p = -(coef_K2 - 2 * β2_n * r0_n * _13rd) * .5 / den
+      q = (coef_K1 * .5) / den
       r = -(coef_K0 + β2_n * r0_n.square() * _13rd) / den
 
       p13 = p * _13rd
       p2 = p13 * p13
       f = r * _13rd - p2
-      g = p13 * (2 * p2 - r) + p * r - 0.5 * q.square()
-      h = 0.25 * g.square() + f * f * f
+      g = p13 * (2 * p2 - r) + p * r - .5 * q.square()
+      h = .25 * g.square() + f * f * f
 
       mask_h = h <= 0
       # h <= 0 branch
       l = f.abs().sqrt()
-      acos_arg = torch.clamp(0.5 * g / (f * l), -1.0, 1.0)
+      acos_arg = torch.clamp(.5 * g / (f * l), -1.0, 1.0)
       m_res = (acos_arg.acos() * _13rd).cos()
       cr1 = 2 * l * m_res - p13
       # h > 0 branch
@@ -344,19 +389,22 @@ class JAGeRLoss(nn.Module):
         log_p_h_max, _mode = log_p_h.max(dim=2)
         _mode_unsq = _mode.unsqueeze(-1)
         mean, _var, _skew, _kurt = self._cent_moments(p_h) 
-        ρ = self._estimate_ρ(_mode, _kurt / _var.square().clamp_min(self._eps), p_h)
+        ρ = self._estimate_ρ_uvar(_mode, _kurt / _var.square().clamp_min(self._eps), p_h)
       
       if conf_gating:
         # ρ gated update 
-        level_counts_B = self._level_counts(Y, H, K)  # (H,K), local batch counts
-        cumul_ρ_B = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype)
-        cumul_ρ_B.scatter_add_(1, Y.T, self.ρ[ids].T.to(dtype=self.cumul_ρ.dtype))
-        cumul_ρ = self.cumul_ρ - cumul_ρ_B
-        mean_ρ_without_B_full = cumul_ρ / (self.level_counts - level_counts_B + 1)  # (H,K)
+        unique_ids_gate = self._unique_step_ids(ids) if update_state else ids.detach().to(self.λ.device, dtype=torch.long)
+        Y_gate = self.Y[unique_ids_gate]
+        old_ρ_gate = self.ρ[unique_ids_gate]
+        level_counts_B_gate = self._level_counts(Y_gate, H, K)  # (H,K), unique current-step rows
+        cumul_ρ_B_gate = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype)
+        cumul_ρ_B_gate.scatter_add_(1, Y_gate.T, old_ρ_gate.T.to(dtype=self.cumul_ρ.dtype))
+        cumul_ρ = self.cumul_ρ - cumul_ρ_B_gate
+        mean_ρ_without_B_full = cumul_ρ / (self.level_counts - level_counts_B_gate + 1)  # (H,K)
         mean_ρ_without_B = mean_ρ_without_B_full.gather(1, Y.T).T  # (B,H)
         t = (global_step // self.steps_per_epoch) if (global_step is not None) else 0
         s_t = (global_step % self.steps_per_epoch) if (global_step is not None) else 0
-        τ = s_t * self.def_batch_size / self.N + t
+        τ = s_t * self.def_batch_size / max(self.N_stats, 1) + t
         γ = (τ + 1)**(-τ)
         ρ = γ * mean_ρ_without_B + (1 - γ) * ρ
       
@@ -383,12 +431,12 @@ class JAGeRLoss(nn.Module):
             (log_S_at_mode.sum(dim=1).squeeze(-1) - log_S_min)
           )
         else:
-          log_S_at_mode_sq = log_S_at_mode.squeeze(-1)  # (B, H)
+          log_S_at_mode = log_S_at_mode.squeeze(-1)  # (B, H)
           u_bound = -(
             self._ce(p_h, log_p_h) +
             log_S_min - logK +
             p_h.take_along_dim(_mode_unsq, 2).squeeze(-1) *
-            (log_S_at_mode_sq - log_S_min)
+            (log_S_at_mode - log_S_min)
           )
           if self._debug and (u_bound.isnan().any() or u_bound.less(0).any() or kl_div.isnan().any() or kl_div.less(0).any()):
             torch.set_printoptions(precision=15, sci_mode=False)
@@ -483,7 +531,7 @@ class JAGeRLoss(nn.Module):
     y_label = y_pred.gather(2, Y.unsqueeze(-1))  
     y_pred = y_pred - y_label 
     if reassignment:
-      y_pred = y_pred + ρ_sq.unsqueeze(-1) * (y_pred.gather(2, _mode_unsq) + y_label)
+      y_pred = y_pred - ρ_sq.unsqueeze(-1) * y_pred.gather(2, _mode_unsq)
     if joint: 
       y_pred = self._outer_sum(y_pred, flat=False).view(B, -1) 
     diff_logits = y_pred + c 
@@ -495,27 +543,19 @@ class JAGeRLoss(nn.Module):
     
     if update_state:
       with torch.no_grad():
+        unique_ids_update, λt_update, ρ_update = self._aggregate_state_updates(ids, λt, ρ if mixture else None)
+
         if conf_gating:
-          cumul_ρ_B_new = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype)
-          cumul_ρ_B_new.scatter_add_(1, Y.T, ρ.T.to(dtype=self.cumul_ρ.dtype))
-
-          delta = cumul_ρ_B_new - cumul_ρ_B  # reuse cumul_ρ_B from forward path
-
-          if dist.is_available() and dist.is_initialized():
-              dist.all_reduce(delta, op=dist.ReduceOp.SUM)
-
+          Y_update = self.Y[unique_ids_update]
+          old_ρ_update = self.ρ[unique_ids_update]
+          assert ρ_update is not None
+          delta = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype)
+          delta.scatter_add_(1, Y_update.T, (ρ_update - old_ρ_update).T.to(dtype=self.cumul_ρ.dtype))
           self.cumul_ρ = self.cumul_ρ + delta
-        
-        if mixture:
-          self.ρ[ids] = ρ
-          if dist.is_available() and dist.is_initialized():
-            gathered: list[tuple | None] = [None for _ in range(dist.get_world_size())]
-            dist.all_gather_object(gathered, (ids.detach().cpu(), ρ.detach().cpu()))
-            for ids_g, ρ_g in gathered:  # type: ignore[misc]
-              if ids_g is None or len(ids_g) == 0:
-                continue
-              self.ρ[ids_g.to(self.ρ.device)] = ρ_g.to(self.ρ.device, dtype=self.ρ.dtype)
-        
+
+        self.λ[unique_ids_update] = λt_update
+        if mixture and ρ_update is not None:
+          self.ρ[unique_ids_update] = ρ_update
       
     self._last_lambda_reg = float(λ_reg_loss.mean().item())
 
