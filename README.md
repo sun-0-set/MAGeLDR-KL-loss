@@ -10,6 +10,26 @@ Please find the output of the CV validation sweep [here](https://drive.google.co
 - The script expects the data file in ``../data/DREsS/DREsS_New_cleaned.tsv``. The file is created by ``preparation.ipynb`` (in the repository root) from the ``DREsS DREsS_New.tsv`` available at the address above.
 - Due to an issue with DeBERTa-v3 tokeniser, the sweep in the paper was run with a locally stored model+tokeniser. Please find a copy [here](https://drive.google.com/drive/folders/1dHv2SCq6ipWfsvLBC8axzUdDZfmeS1s4?usp=sharing) and store in ``../models/deberta-v3-large`` to replicate.
 
+## Environment
+
+The checked-in editor and batch configuration now target the ``jager-cv`` conda env with Python 3.13.
+
+```bash
+conda create -y -n jager-cv python=3.13
+conda activate jager-cv
+pip install -r requirements.txt
+```
+
+If you already have a ``jager-cv`` env on Python 3.14, either recreate it or downgrade it in place:
+
+```bash
+conda install -y -n jager-cv python=3.13
+```
+
+For Python 3.13, install ``torch`` from the default PyPI index. GPU use still depends on the host NVIDIA driver being new enough for the bundled CUDA runtime in the available PyTorch wheel.
+
+If you need GPU execution, make sure the host NVIDIA driver is new enough for the bundled CUDA runtime in the available PyTorch wheel. On older drivers, imports will still resolve but ``torch.cuda.is_available()`` will stay false.
+
 The command used for training: **(please set ``--devices`` to the number of available GPUs and adjust ``--concurrency`` accordingly)**
 ```bash
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -64,4 +84,3 @@ python sweep.py --phase nested \
 
 
 *Active research code; interfaces may evolve.*
-

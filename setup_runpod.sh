@@ -38,17 +38,19 @@ conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 
 
 echo "=== [2/4] Creating conda environment '$ENV_NAME' ==="
 if conda env list | grep -qw "$ENV_NAME"; then
-  echo "[info] Environment '$ENV_NAME' already exists — skipping create."
+  echo "[info] Environment '$ENV_NAME' already exists — switching it to Python 3.13."
+  conda install -y -n "$ENV_NAME" python=3.13
 else
   conda create -y -n "$ENV_NAME" python=3.13
 fi
 conda activate "$ENV_NAME"
 
-echo "=== [3/4] Installing PyTorch (CUDA 12.x) ==="
+echo "=== [3/4] Refreshing packaging tools ==="
 pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 echo "=== [4/4] Installing project dependencies ==="
+# Python 3.13 wheels are published via the default PyPI torch package.
+# GPU use still depends on the host driver being new enough for the bundled CUDA runtime.
 pip install -r "$PROJECT_DIR/requirements.txt"
 
 echo ""
