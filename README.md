@@ -37,7 +37,7 @@ Expect the following to change as experiments evolve:
 
 ## Data Assumptions
 
-The DREsS dataset is not included in the repository but us available publicly
+The DREsS dataset is not included in the repository but us available publicly [here](https://haneul-yoo.github.io/dress/).
 
 Training expects a CSV or TSV with:
 
