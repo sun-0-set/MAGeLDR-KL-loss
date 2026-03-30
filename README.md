@@ -1,18 +1,66 @@
-## JAGeR Loss
+# Multi-Trait Ordinal Classification Experiments
 
-3‑head DeBERTa-v3-large for Content/Organization/Language (5 classes each). Losses: MAGe‑LDR-KL (mixture/uniform), ALDR‑KL, CE.
+This repository is an active research workspace for multi-trait ordinal classification on essay-response data.
 
-Trained on DREsS dataset with `prompt`, `essay` and targets: `content`,`organization`,`language` (ints in 1..5). Not included in the repository - available [here](https://haneul-yoo.github.io/dress/).
+The current setup uses a shared Transformer encoder plus one prediction head per trait to score `(prompt, essay)` pairs.
 
-Please find the output of the CV validation sweep [here](https://drive.google.com/drive/folders/1bOAcUg4I7NvRfZzBmdU1Imy1KLvNjYos?usp=drive_link).
+In the DREsS experiments, those traits are typically `content`, `organization`, and `language`, each treated as an ordinal label in `1..5`.
 
-**Note:** 
-- The script expects the data file in ``../data/DREsS/DREsS_New_cleaned.tsv``. The file is created by ``preparation.ipynb`` (in the repository root) from the ``DREsS DREsS_New.tsv`` available at the address above.
-- Due to an issue with DeBERTa-v3 tokeniser, the sweep in the paper was run with a locally stored model+tokeniser. Please find a copy [here](https://drive.google.com/drive/folders/1dHv2SCq6ipWfsvLBC8axzUdDZfmeS1s4?usp=sharing) and store in ``../models/deberta-v3-large`` to replicate.
+## What This Repo Is Testing
 
-## Environment
+The main question is how different loss constructions behave for multi-trait ordinal prediction, especially when the traits are modeled either independently or jointly.
 
-The checked-in editor and batch configuration now target the ``jager-cv`` conda env with Python 3.13.
+Current experiments compare:
+
+- `ce`: standard per-trait cross-entropy
+- `ce` with label smoothing
+- `jager`: the ordinal loss family implemented in [loss.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/loss.py)
+- joint vs per-trait modeling via `--joint` / `--no-joint`
+- mixture-based modeling via `--mixture` / `--no-mixture`
+- confidence-gated updates via `--conf_gating`
+- competitor reassignment via `--reassignment`
+- label-distribution-aware margins controlled by `--lambda0`, `--lambda_min`, `--alpha`, and `--C`
+
+The launch scripts sweep combinations of these switches to study which parts help for multi-trait ordinal classification.
+
+## Research Status
+
+This is research-in-progress code, not a stable package.
+
+Expect the following to change as experiments evolve:
+
+- CLI flags
+- default paths
+- launch scripts
+- result layouts
+- naming
+
+## Data Assumptions
+
+The DREsS dataset is not included in the repository but us available publicly
+
+Training expects a CSV or TSV with:
+
+- `prompt`
+- `essay`
+- one or more numeric ordinal target columns
+
+By default, [train.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/train.py) looks for:
+
+`../data/DREsS/DREsS_New_cleaned.tsv`
+
+[make_prompt_cv_splits.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/make_prompt_cv_splits.py) can be used to generate prompt-grouped cross-validation splits so prompts stay isolated across train, validation, and test folds.
+
+## Main Files
+
+- [train.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/train.py): train and evaluate a single experiment
+- [loss.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/loss.py): loss implementations and ablation logic
+- [modeling_multitask.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/modeling_multitask.py): shared encoder with one head per trait
+- [make_prompt_cv_splits.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/make_prompt_cv_splits.py): prompt-grouped CV split generation
+- [launch_cv_k6.sh](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/launch_cv_k6.sh) and [dress_cv_k6.slurm](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/dress_cv_k6.slurm): example ablation sweeps
+- [utils/aggregate_results.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/utils/aggregate_results.py): collect per-run `metrics.json` files
+
+## Minimal Setup
 
 ```bash
 conda create -y -n jager-cv python=3.13
@@ -20,67 +68,19 @@ conda activate jager-cv
 pip install -r requirements.txt
 ```
 
-If you already have a ``jager-cv`` env on Python 3.14, either recreate it or downgrade it in place:
+## Minimal Run
 
-```bash
-conda install -y -n jager-cv python=3.13
-```
+After preparing the data file and a split JSON:
 
-For Python 3.13, install ``torch`` from the default PyPI index. GPU use still depends on the host NVIDIA driver being new enough for the bundled CUDA runtime in the available PyTorch wheel.
-
-If you need GPU execution, make sure the host NVIDIA driver is new enough for the bundled CUDA runtime in the available PyTorch wheel. On older drivers, imports will still resolve but ``torch.cuda.is_available()`` will stay false.
-
-The command used for training: **(please set ``--devices`` to the number of available GPUs and adjust ``--concurrency`` accordingly)**
-```bash
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python sweep.py \
-  --phase nested \
-  --tsv ../data/DREsS/DREsS_New_cleaned.tsv \
-  --nested_k 5 --nested_j 1 \
-  --nproc 1 \
-  --devices 0,1,2,3,4,5,6,7 \
-  --concurrency 8 \
-  --inner_epochs 10 \
-  --final_epochs 15 \
-  --batch_size 42 \
-  --grad_accum 1 \
-  --lr 2e-5
-```
-
-
-Other examples:
-
-### Test run (1 epoch)
 ```bash
 python train.py \
-  --loss mage --distribution mixture --lambda0 1 --alpha 2 --C 0.3 \
-  --split_file splits/dress_seed42.json --eval_test \
-  --epochs 1 --batch_size 2 --grad_accum 4 \
-  --model_name tasksource/deberta-small-long-nli --max_length 512 \
-  --save_dir sweeps/smoke
-```
-
-## 3 epochs with batch size 2, gradiaent accumulation at 8:
-```bash
-python train.py \
-  --loss mage --distribution mixture --lambda0 1 --alpha 2 --C 0.3 \
-  --split_file splits/dress_seed42.json --eval_test --inference_with_prior \
+  --data_path ../data/DREsS/DREsS_New_cleaned.tsv \
+  --split_file splits/k6_promptcv/fold0.json \
+  --model_name ../models/deberta-v3-large \
+  --loss jager --joint --mixture --conf_gating --reassignment \
+  --lambda0 3 --lambda_min 0.5 --C 1e-1 \
   --epochs 3 --batch_size 2 --grad_accum 8 \
-  --model_name /path/to/local_models/deberta-v3-large --max_length 1024 \
-  --hf_offline --use_fast_tokenizer 1 \
-  --save_dir sweeps/run1
+  --save_dir runs/example
 ```
 
-## Nested CV (joint‑stratified)
-```bash
-python sweep.py --phase nested \
-  --tsv ../data/DREsS/DREsS_New_cleaned.tsv \
-  --nested_k 5 --nested_j 1 --nested_seed 42 \
-  --concurrency 2 --devices 0,1
-```
-
-## Outputs per run
-- `best.pt`, `run_args.json`, `metrics.json` (val/test: acc, QWK, F1; overall micro‑F1).
-
-
-*Active research code; interfaces may evolve.*
+For the full ablation grid, adapt the provided launch scripts to your local machine or cluster.
