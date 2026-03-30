@@ -39,7 +39,7 @@ class JAGeRLoss(nn.Module):
       def _trunc_disc_norm_grid(K):
         φ_sq_inv_halved: tuple[float, ...] = (0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486) # precomputed .5/φ(K)^2 for K=4..10; for K>10 approximate with .5
         k = torch.arange(K, device=device, dtype=torch.int16)
-        return F.softmax(-(φ_sq_inv_halved[K-4] if K<=10 else .5) * (k[:,None] - k).square(), dim=1)
+        return F.softmax(-(φ_sq_inv_halved[K-4] if K<=10 else .5) * (k[:,None] - k).square(), dim=1, dtype=torch.float64)
 
 
         
@@ -69,6 +69,7 @@ class JAGeRLoss(nn.Module):
       self.reassignment = reassignment
       self.conf_gating = conf_gating
       
+      self.Y = (Y - level_offset).long().to(device)
       self.N, self.H = self.Y.shape
       if stats_ids is None:
         stats_Y = self.Y
@@ -84,7 +85,6 @@ class JAGeRLoss(nn.Module):
       self.K = K
       self.logK = log(K)
       
-      self.Y = (Y - level_offset).long().to(device)
       self.λ0 = λ0
       self.λ: torch.Tensor
       self.register_buffer(
@@ -457,8 +457,8 @@ class JAGeRLoss(nn.Module):
           level_counts_B_gate = self._level_comb_counts(Y_gate, K).view(-1) if joint else self._level_counts(Y_gate, K)
           cumul_ρ_B_gate = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype)
           if joint:
-            Y_gate = (Y_gate * factors).sum(dim=1).T
-          cumul_ρ_B_gate.scatter_add_(-1, Y_gate.T, old_ρ_gate.to(dtype=self.cumul_ρ.dtype))
+            Y_gate = (Y_gate * factors).sum(dim=1)
+          cumul_ρ_B_gate.scatter_add_(-1, Y_gate.movedim(0, -1), old_ρ_gate.to(dtype=self.cumul_ρ.dtype).movedim(0, -1))
           cumul_ρ = self.cumul_ρ - cumul_ρ_B_gate
           mean_ρ_without_B_full = cumul_ρ / ((self.level_comb_counts if joint else self.level_counts) - level_counts_B_gate + 1)
           mean_ρ_without_B = mean_ρ_without_B_full.gather(0, (Y*factors).sum(1)) if joint else mean_ρ_without_B_full.gather(1, Y.T).T
@@ -471,7 +471,7 @@ class JAGeRLoss(nn.Module):
       # λ update
       Ent_p_h = self._ce(p_h, log_p_h)
       if mixture:
-        Kπminus1_pred_mode: torch.Tensor = self.Kπminus1[*_mode.T if joint else _mode]
+        Kπminus1_pred_mode: torch.Tensor = self.Kπminus1[tuple(_mode.T) if joint else _mode]
         log_S = (ρ.unsqueeze(-1)*Kπminus1_pred_mode).log1p() # logK is subtracted as per need
         _cond: torch.Tensor = _mode < K-_mode  # type: ignore[assignment]
         min_idx = torch.where(_cond, K-1, 0)
@@ -542,7 +542,7 @@ class JAGeRLoss(nn.Module):
       # competitor assignment
       if mixture:
         if reassignment:
-          Kπminus1_label: torch.Tensor = self.Kπminus1[*Y.T if joint else Y]
+          Kπminus1_label: torch.Tensor = self.Kπminus1[tuple(Y.T) if joint else Y]
         if joint:
           r_mode = self._outer_sum(self.D[_mode].to(torch.long))
           if reassignment:
@@ -610,9 +610,9 @@ class JAGeRLoss(nn.Module):
         if conf_gating:
           Y_update = self.Y[unique_ids_update]
           old_ρ_update = self.ρ[unique_ids_update]
-          assert ρ_update is not None
+          assert ρ_update is not None, "ρ_update should not be None when conf_gating is enabled."
           delta = torch.zeros_like(self.cumul_ρ, dtype=self.cumul_ρ.dtype)
-          delta.scatter_add_(-1, (Y_update*factors).sum(1) if joint else Y_update.T, (ρ_update - old_ρ_update).to(dtype=self.cumul_ρ.dtype))
+          delta.scatter_add_(-1, (Y_update*factors).sum(1) if joint else Y_update.T, (ρ_update - old_ρ_update).to(dtype=self.cumul_ρ.dtype).movedim(0, -1))
           self.cumul_ρ = self.cumul_ρ + delta
 
         self.λ[unique_ids_update] = λt_update
