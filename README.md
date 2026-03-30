@@ -1,4 +1,4 @@
-# Multi-Trait Ordinal Classification Experiments
+# Multi-Trait Ordinal Classification Experiment
 
 This repository is an active research workspace for multi-trait ordinal classification on essay-response data.
 
