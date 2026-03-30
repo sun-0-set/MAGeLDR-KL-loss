@@ -6,7 +6,7 @@ The current setup uses a shared Transformer encoder plus one prediction head per
 
 In the DREsS experiments, those traits are typically `content`, `organization`, and `language`, each treated as an ordinal label in `1..5`.
 
-## What This Repo Is Testing
+## Experiment
 
 The main question is how different loss constructions behave for multi-trait ordinal prediction, especially when the traits are modeled either independently or jointly.
 
