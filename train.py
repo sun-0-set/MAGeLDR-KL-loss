@@ -1,4 +1,4 @@
-import math, os, random, argparse, csv, json
+import math, os, random, argparse, csv, json, re, shutil, subprocess
 import contextlib
 from typing import Any, TypedDict
 import torch
@@ -13,7 +13,7 @@ except Exception:
 torch.set_float32_matmul_precision("medium")
 
 from datetime import timedelta
-from transformers import get_linear_schedule_with_warmup, AutoTokenizer, DataCollatorWithPadding, PreTrainedTokenizerFast
+from transformers import get_linear_schedule_with_warmup, DataCollatorWithPadding, AutoTokenizer
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, cohen_kappa_score, recall_score
 import numpy as np
@@ -132,47 +132,6 @@ def _override_attrs(obj, **updates):
             setattr(obj, name, value)
 
 
-def _eval_loss_from_gathered(
-    ids_cpu: "torch.Tensor",
-    labels_cpu: "torch.Tensor",
-    logits_cpu: "torch.Tensor",
-    loss_fn,
-    device: torch.device,
-    level_offset: int,
-    chunk_size: int,
-):
-    if ids_cpu.numel() == 0:
-        return float("nan")
-    pin = (device.type == "cuda")
-    total_loss, total_count = 0.0, 0
-    chunk_size = max(1, int(chunk_size))
-    override_ctx = (
-        _override_attrs(loss_fn, conf_gating=False, log_to_wandb=False)
-        if isinstance(loss_fn, JAGeRLoss)
-        else contextlib.nullcontext()
-    )
-    with torch.inference_mode(), override_ctx:
-        for start in range(0, ids_cpu.size(0), chunk_size):
-            end = min(start + chunk_size, ids_cpu.size(0))
-            logits = logits_cpu[start:end].to(device, non_blocking=pin)
-            ids = ids_cpu[start:end].to(device, non_blocking=pin)
-            if isinstance(loss_fn, JAGeRLoss):
-                loss = loss_fn(logits, ids, update_state=False)
-                weight = int(end - start) if loss_fn.joint else int(labels_cpu[start:end].numel())
-            elif isinstance(loss_fn, MultiHeadCELoss):
-                loss = loss_fn(logits, ids)
-                weight = int(labels_cpu[start:end].numel())
-            else:
-                labels = (labels_cpu[start:end] - level_offset).to(device, non_blocking=pin)
-                flat_logits = logits.reshape(-1, logits.shape[-1])
-                flat_labels = labels.reshape(-1)
-                loss = F.cross_entropy(flat_logits, flat_labels, reduction="mean")
-                weight = int(flat_labels.numel())
-            total_loss += float(loss.item()) * weight
-            total_count += weight
-    return total_loss / max(total_count, 1)
-
-
 def set_seed(s):
     random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
 
@@ -183,6 +142,39 @@ def _dataset_row_ids(ds) -> np.ndarray:
         idx = np.asarray(ds.indices, dtype=np.int64)
         return base[idx]
     return np.arange(len(ds), dtype=np.int64)
+
+
+def _get_nvidia_driver_version() -> tuple[str | None, str]:
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi:
+        try:
+            out = subprocess.check_output(
+                [nvidia_smi, "--query-gpu=driver_version", "--format=csv,noheader"],
+                text=True,
+                stderr=subprocess.STDOUT,
+                timeout=10,
+            )
+            versions = sorted({line.strip() for line in out.splitlines() if line.strip()})
+            if versions:
+                return ",".join(versions), nvidia_smi
+        except Exception as exc:
+            smi_err = f"{type(exc).__name__}: {exc}"
+    else:
+        smi_err = "nvidia-smi not found"
+
+    proc_path = "/proc/driver/nvidia/version"
+    try:
+        with open(proc_path) as f:
+            text = f.read()
+        match = re.search(r"Kernel Module\s+([0-9.]+)", text)
+        if match:
+            return match.group(1), proc_path
+    except OSError as exc:
+        proc_err = f"{type(exc).__name__}: {exc}"
+    else:
+        proc_err = f"could not parse {proc_path}"
+
+    return None, f"{smi_err}; {proc_err}"
 
 
 class ShardedEvalSampler(Sampler[int]):
@@ -258,8 +250,6 @@ def parse_args():
     p.add_argument("--model_name", default="microsoft/deberta-v3-large")
     p.add_argument("--hf_offline", action="store_true",
                    help="Force offline mode and local files only for HF")
-    p.add_argument("--use_fast_tokenizer", action=argparse.BooleanOptionalAction, default=True,
-                   help="Use fast tokenizer (--no-use_fast_tokenizer for slow/SentencePiece)")
     p.add_argument("--max_length", type=int, default=1024)
     p.add_argument("--pad_to_multiple_of", type=int, default=8, help="dynamic padding grid")
 
@@ -298,8 +288,6 @@ def parse_args():
     p.add_argument("--alpha", type=float, default=2.0, help="α (JAGeR)")
     p.add_argument("--C", type=float, default=1e-1, help="margin C (JAGeR)")
     p.add_argument("--ce_label_smoothing", type=float, default=0.0, help="label smoothing for CE baseline")
-    p.add_argument("--log_epoch_stats", action="store_true",
-                   help="Write per-epoch min/mean/max for λ (and ρ if available) to save_dir/epoch_stats.csv")
 
     # --- Evaluation / run modes ---------------------------------------
     p.add_argument("--eval_test", action="store_true",
@@ -316,7 +304,7 @@ def parse_args():
     return p.parse_args()
 
 
-def evaluate(model, dl, loss_fn, device, args=None):
+def evaluate(model, dl, loss_fn, device, args=None, return_payload: bool = False):
     assert args is not None, "evaluate requires args with num_heads/K/level_offset/target_cols/minority_classes"
     assert hasattr(args, "num_heads") and hasattr(args, "K") and hasattr(args, "level_offset")
     assert hasattr(args, "target_cols") and hasattr(args, "minority_classes")
@@ -330,7 +318,8 @@ def evaluate(model, dl, loss_fn, device, args=None):
     num_heads = int(args.num_heads)
     K = int(args.K)
     level_offset = int(args.level_offset)
-    eval_loss_chunk = max(1, int(getattr(args, "batch_size", 1)))
+    head_names = list(args.target_cols)
+    base_model = model.module if hasattr(model, "module") else model
 
     all_ids = []
     all_labels = []
@@ -339,8 +328,16 @@ def evaluate(model, dl, loss_fn, device, args=None):
     all_pred = [[] for _ in range(num_heads)]
     sum_emd_by_class = torch.zeros(num_heads, K, dtype=torch.float64)
     count_by_class   = torch.zeros(num_heads, K, dtype=torch.long)
+    loss_sum = 0.0
+    loss_weight = 0
+    logits_dtype = None
+    override_ctx = (
+        _override_attrs(loss_fn, conf_gating=False, log_to_wandb=False)
+        if isinstance(loss_fn, JAGeRLoss)
+        else contextlib.nullcontext()
+    )
 
-    with torch.inference_mode():
+    with torch.inference_mode(), override_ctx:
         for batch in dl:
             pin = (device.type == "cuda")
             ids = batch["ids"].to(device, non_blocking=pin)
@@ -351,33 +348,57 @@ def evaluate(model, dl, loss_fn, device, args=None):
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):  # type: ignore[attr-defined]
                 out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-            y_pred = (out["logits"] if isinstance(out, dict) and "logits" in out else out).to(torch.float64)  # type: ignore[union-attr]
+            y_pred = (out["logits"] if isinstance(out, dict) and "logits" in out else out)  # type: ignore[union-attr]
+            if args.loss == "jager": y_pred = y_pred.to(torch.float64)
+            logits_dtype = y_pred.dtype
+            if isinstance(loss_fn, JAGeRLoss):
+                loss = loss_fn(y_pred, ids, update_state=False)
+                weight = int(input_ids.size(0)) if loss_fn.joint else int(labels.numel())
+            elif isinstance(loss_fn, MultiHeadCELoss):
+                loss = loss_fn(y_pred, ids)
+                weight = int(labels.numel())
+            else:
+                labels_dev = (labels - level_offset).to(device, non_blocking=pin)
+                flat_logits = y_pred.reshape(-1, y_pred.shape[-1])
+                flat_labels = labels_dev.reshape(-1)
+                loss = F.cross_entropy(flat_logits, flat_labels, reduction="mean")
+                weight = int(flat_labels.numel())
+            loss_sum += float(loss.item()) * weight
+            loss_weight += weight
 
             logits = y_pred.detach().cpu()
             all_ids.append(ids.detach().cpu())
             all_labels.append(labels)
             all_logits.append(logits)
 
+    loss_stats = torch.tensor([loss_sum, float(loss_weight)], dtype=torch.float64, device=device)
+    if is_dist():
+        dist.all_reduce(loss_stats, op=dist.ReduceOp.SUM)
+    tot_loss = float(loss_stats[0].item() / max(loss_stats[1].item(), 1.0))
+
+    if logits_dtype is None:
+        if args.loss == "jager":
+            logits_dtype = torch.float64
+        elif use_amp:
+            logits_dtype = amp_dtype
+        else:
+            logits_dtype = next(base_model.heads.parameters()).dtype  # type: ignore[union-attr]
+
     empty_ids = torch.empty((0,), dtype=torch.long)
     empty_labels = torch.empty((0, num_heads), dtype=torch.long)
-    empty_logits = torch.empty((0, num_heads, K), dtype=torch.float64)
+    empty_logits = torch.empty((0, num_heads, K), dtype=logits_dtype)
     ids_cat = torch.cat(all_ids, dim=0) if all_ids else empty_ids
     labels_cat = torch.cat(all_labels, dim=0) if all_labels else empty_labels
     logits_cat = torch.cat(all_logits, dim=0) if all_logits else empty_logits
     ids_all, labels_all, logits_all = _gather_eval_payload(ids_cat, labels_cat, logits_cat)
 
     if is_dist() and not is_main_process():
+        if return_payload:
+            return (
+                float("nan"), [], [], [], float("nan"), [], float("nan"),
+                np.empty((0,), dtype=np.int64), {}, {}
+            )
         return (float("nan"), [], [], [], float("nan"), [], float("nan"))
-
-    tot_loss = _eval_loss_from_gathered(
-        ids_all,
-        labels_all,
-        logits_all,
-        loss_fn,
-        device,
-        level_offset,
-        eval_loss_chunk,
-    )
     pred_idx = logits_all.argmax(-1)
     probs = torch.softmax(logits_all.float(), dim=-1)
 
@@ -417,6 +438,23 @@ def evaluate(model, dl, loss_fn, device, args=None):
     macro_emd = float(sum(emds) / len(emds)) if emds else float("nan")
     tail_recall_avg = float(sum(tail_recalls) / len(tail_recalls)) if tail_recalls else float("nan")
 
+    if return_payload:
+        ids_np = ids_all.numpy()
+        y_payload = {name: labels_all[:, h].numpy() for h, name in enumerate(head_names)}
+        p_payload = {name: probs[:, h, :].numpy() for h, name in enumerate(head_names)}
+        return (
+            tot_loss,
+            cms,
+            qwks,
+            emds,
+            macro_emd,
+            tail_recalls,
+            tail_recall_avg,
+            ids_np,
+            y_payload,
+            p_payload,
+        )
+
     return (
         tot_loss,
         cms,
@@ -426,74 +464,6 @@ def evaluate(model, dl, loss_fn, device, args=None):
         tail_recalls,
         tail_recall_avg
     )
-
-def _get_head_names_from_loader(dl):
-    ds = dl.dataset
-    while hasattr(ds, "dataset"):  # unwrap Subset chains
-        ds = ds.dataset
-    if hasattr(ds, "target_cols"):
-        return list(ds.target_cols)
-    if hasattr(ds, "label_cols"):
-        return list(ds.label_cols)
-    sample = ds[0]
-    if isinstance(sample, dict) and "labels" in sample:
-        H = int(sample["labels"].shape[-1])
-        return [f"head{h}" for h in range(H)]
-    return []
-
-
-@torch.no_grad()
-def predict_probs_on_loader(model, dl, device):
-    model.eval()
-    base_model = model.module if hasattr(model, "module") else model
-    head_names = _get_head_names_from_loader(dl)
-
-    all_ids = []
-    all_labels = []
-    all_probs = []
-
-    for batch in dl:
-        ids = batch["ids"].detach().cpu()
-        labels = batch["labels"].detach().cpu()
-
-        all_ids.append(ids)
-        all_labels.append(labels)
-
-        x = {
-            k: v.to(device, non_blocking=True)
-            for k, v in batch.items()
-            if k in ("input_ids", "attention_mask", "token_type_ids") and isinstance(v, torch.Tensor)
-        }
-        out = model(**x)
-        logits = out["logits"] if isinstance(out, dict) and "logits" in out else out
-        all_probs.append(torch.softmax(logits.float(), dim=-1).detach().cpu())  # type: ignore[union-attr]
-
-    H = all_labels[0].shape[1] if all_labels else len(head_names)
-    if H == 0 and hasattr(base_model, "heads"):
-        H = len(base_model.heads)  # type: ignore[arg-type]
-    if not head_names:
-        head_names = [f"head{h}" for h in range(H)]
-    C = all_probs[0].shape[-1] if all_probs else 0
-    if C == 0 and hasattr(base_model, "heads") and len(base_model.heads) > 0:  # type: ignore[arg-type]
-        C = int(base_model.heads[0].out_features)  # type: ignore[index]
-
-    # Ranks with empty shards must still participate in the cross-rank gather.
-    empty_ids = torch.empty((0,), dtype=torch.long)
-    empty_labels = torch.empty((0, H), dtype=torch.long)
-    empty_probs = torch.empty((0, H, C), dtype=(all_probs[0].dtype if all_probs else torch.float32))
-    ids_cat = torch.cat(all_ids, dim=0) if all_ids else empty_ids
-    labels_cat = torch.cat(all_labels, dim=0) if all_labels else empty_labels
-    probs_cat = torch.cat(all_probs, dim=0) if all_probs else empty_probs
-    ids_all, labels_all, probs_all = _gather_eval_payload(ids_cat, labels_cat, probs_cat)
-
-    if is_dist() and not is_main_process():
-        return np.empty((0,), dtype=np.int64), {}, {}
-
-    ids = ids_all.numpy()
-    y = {name: labels_all[:, h].numpy() for h, name in enumerate(head_names)}
-    p = {name: probs_all[:, h, :].numpy() for h, name in enumerate(head_names)}
-    return ids, y, p
-
 
 def _maybe_init_wandb(args):
     if not getattr(args, "wandb", False) or args.wandb_mode == "disabled":
@@ -547,6 +517,47 @@ def _log_cms_as_wandb_images(cms, split: str, head_names, level_offset: int, ste
         plt.close(fig)
 
 
+def _load_tokenizer_strict(model_name: str):
+    tok_path = os.path.join(model_name, "tokenizer.json")
+    added = 0
+
+    if not os.path.isdir(model_name):
+        raise RuntimeError(
+            f"Refusing to train without a local model directory: {model_name}. "
+            "Point --model_name to the saved directory that contains tokenizer.json."
+        )
+    if not os.path.exists(tok_path):
+        raise RuntimeError(
+            f"Refusing to train without a saved fast tokenizer: missing {tok_path}. "
+            "Create/save tokenizer.json first, then rerun."
+        )
+
+    tok = AutoTokenizer.from_pretrained(
+        model_name,
+        use_fast=True,
+        local_files_only=True,
+        trust_remote_code=False,
+    )
+
+    bad_fast_wrappers = {"Tokenizer", "TokenizersBackend"}
+    if (not getattr(tok, "is_fast", False)) or (tok.__class__.__name__ in bad_fast_wrappers):
+        raise RuntimeError(
+            f"Refusing to train with tokenizer class={tok.__class__.__name__!r} from local model dir {model_name}. "
+            "Expected a usable fast tokenizer loaded from the saved local model bundle."
+        )
+
+    tok_name_or_path = getattr(tok, "name_or_path", "")
+    if tok_name_or_path:
+        want = os.path.realpath(model_name)
+        got = os.path.realpath(tok_name_or_path)
+        if want != got:
+            raise RuntimeError(
+                f"Refusing to train because tokenizer resolved to {tok_name_or_path!r}, not the requested local model dir {model_name!r}."
+            )
+
+    return tok, added, "local_saved_model"
+
+
 def main():
     args = parse_args()
     
@@ -578,34 +589,24 @@ def main():
             device = torch.device(f"cuda:{local_rank}") if dist_uses_cuda else torch.device("cpu")
         else:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.set_num_threads(max(1, os.cpu_count() or 1))
         if device.type == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+        if is_main_process():
+            driver_version, driver_source = _get_nvidia_driver_version()
+            if driver_version is not None:
+                print(f"[env] nvidia_driver_version={driver_version} source={driver_source}")
+            else:
+                print(f"[env] nvidia_driver_version=unavailable detail={driver_source}")
 
         # Build dataset 
-        tok_path = os.path.join(args.model_name, "tokenizer.json")
-        added = 0
-        if os.path.isdir(args.model_name) and os.path.exists(tok_path):
-            tok = PreTrainedTokenizerFast(tokenizer_file=tok_path)
-            spec_path = os.path.join(args.model_name, "special_tokens_map.json")
-            if os.path.exists(spec_path):
-                with open(spec_path) as _f:
-                    spec = json.load(_f)
-                to_add = {k: v for k, v in spec.items() if isinstance(v, str)}
-                if to_add:
-                    added = tok.add_special_tokens(to_add)  # type: ignore[arg-type]
-        else:
-            tok = AutoTokenizer.from_pretrained(
-                args.model_name,
-                use_fast=bool(args.use_fast_tokenizer),
-                local_files_only=bool(args.hf_offline),
-                trust_remote_code=False,
-            )
+        tok, added, tok_src = _load_tokenizer_strict(
+            args.model_name,
+        )
         if is_main_process():
             print(
                 f"[tok] class={tok.__class__.__name__} fast={getattr(tok, 'is_fast', None)} "
-                f"src={'tokenizer.json' if os.path.exists(tok_path) else args.model_name}"
+                f"src={tok_src}"
             )
         # ---- Generic dataset + splits ----
         ds = EssayDataset(
@@ -761,6 +762,11 @@ def main():
         if added:
             model.resize_token_embeddings(len(tok))  # type: ignore[union-attr]
 
+        if is_main_process():
+            enc_dtype = next(model.encoder.parameters()).dtype  # type: ignore[union-attr]
+            head_dtype = next(model.heads.parameters()).dtype  # type: ignore[union-attr]
+            print(f"[model] encoder_dtype={enc_dtype} heads_dtype={head_dtype}")
+
         # Print gradient checkpointing status
         def unwrap(m): return m.module if hasattr(m, "module") else m
         if is_main_process():
@@ -781,11 +787,8 @@ def main():
                 ddp_kwargs["output_device"] = device.index
             model = torch.nn.parallel.DistributedDataParallel(model, **ddp_kwargs)
         
-        # Head-only warmup
+        # MultiHeadDeberta already applies freeze_encoder during construction.
         if args.freeze_encoder:
-            enc = model.module.encoder if is_dist() else model.encoder  # type: ignore[union-attr]
-            for p in enc.parameters():  # type: ignore[union-attr]
-                p.requires_grad = False
             if is_main_process():
                 print(">> Encoder frozen (training heads only).")
             
@@ -847,7 +850,10 @@ def main():
             **({"test": test_view_ids} if eval_test_flag else {}),
             "all":   idx_all,
         }
-        static_stats = _collect_static_stats(loss_fn, views)
+        def _current_static_stats():
+            return _collect_static_stats(loss_fn, views)
+
+        static_stats = _current_static_stats()
         if is_main_process() and run_wandb is not None and not args.eval_only:
             _log_static_stats_to_wandb(static_stats)
 
@@ -860,7 +866,7 @@ def main():
             ckpt = torch.load(best_path, map_location="cpu")
             unwrap(model).load_state_dict(ckpt["model"])  # type: ignore[union-attr]
             _restore_loss_state_from_ckpt(loss_fn, ckpt, best_path)
-            static_stats = _collect_static_stats(loss_fn, views)
+            static_stats = _current_static_stats()
             if is_main_process() and run_wandb is not None:
                 _log_static_stats_to_wandb(static_stats)
 
@@ -927,6 +933,7 @@ def main():
         improved = False
         global_step = 0
         val_pred_epochs = []  # list of {"epoch": int, "ids": np.ndarray, "y": dict, "p": dict}
+        last_val_metrics = None
 
         def _log_train_step(step_loss: float, epoch_num: int):
             nonlocal global_step
@@ -972,7 +979,7 @@ def main():
                     # Autocast forward (bf16 on A100)
                     with amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):  # type: ignore[attr-defined]
                         out = model(input_ids=input_ids, attention_mask=attention_mask)
-                    y_pred = out["logits"].to(torch.float64)  # cast up for JAGeR
+                    y_pred = out["logits"].to(torch.float64) if args.loss == "jager" else out["logits"]  # cast up for JAGeR
                     # per-forward state updates in loss; pass 0-based micro-step consistent across ranks
                     micro_step = (epoch - 1) * len(dl_train) + (step - 1)
                     try:
@@ -1011,15 +1018,24 @@ def main():
                     print(f"[epoch {epoch}] train_loss(avg per step)={running/max(1, math.ceil(len(dl_train)/args.grad_accum)):.4f} "
                             f"lambda[min,max]=[{lam_min:.6f},{lam_max:.6f}]{lam_reg_str}")
 
-            val_loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg = evaluate(
+            val_loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg, ids_e, y_e, p_e = evaluate(
                 model.module if is_dist() else model,
-                dl_val, loss_fn, device, args
+                dl_val, loss_fn, device, args, return_payload=True
             )
-            ids_e, y_e, p_e = predict_probs_on_loader(model.module if is_dist() else model, dl_val, device)
             avg_qwk = float("nan")
 
             if is_main_process():
                 val_pred_epochs.append({"epoch": int(epoch), "ids": ids_e, "y": y_e, "p": p_e})
+                last_val_metrics = {
+                    "loss": float(val_loss),
+                    "qwk": [float(x) for x in qwks],
+                    "qwk_average": float(sum(qwks) / len(qwks)) if len(qwks) else float("nan"),
+                    "cm": [cm.tolist() for cm in cms],
+                    "emd": [float(x) for x in emds],
+                    "macroEMD": float(macro_emd),
+                    "tail_recall0": [float(x) for x in tail_recalls],
+                    "tail_recall0_average": float(tail_recall_avg),
+                }
 
                 # average QWK across heads
                 avg_qwk = float(sum(qwks) / len(qwks)) if len(qwks) else float("nan")
@@ -1085,9 +1101,13 @@ def main():
 
             # ----- determine improvement by avg QWK (maximize), regardless of saving -----
             improved = False
-            if is_main_process() and (avg_qwk > best_qwk):
-                best_qwk = avg_qwk
-                improved = True
+            if is_main_process():
+                if math.isfinite(avg_qwk):
+                    if avg_qwk > best_qwk:
+                        best_qwk = avg_qwk
+                        improved = True
+                else:
+                    print(f"[warn] epoch {epoch} averageQWK is non-finite ({avg_qwk}); skipping best-model update")
             if is_dist():
                 improved_t = torch.tensor(int(improved), device=device)
                 dist.broadcast(improved_t, src=0)
@@ -1126,60 +1146,6 @@ def main():
                     except Exception as e:
                         print("[W&B] artifact log skipped:", e)
 
-                # --- append per-epoch stats (refit only; enabled by flag) ---
-                if args.log_epoch_stats:
-                    # union of train/val/(test if present) was built earlier
-                    ids = idx_all
-                    row: dict[str, int | float] = {"epoch": int(epoch)}
-                    # λ: JAGeR shape depends on joint/per-head implementation
-                    λ = getattr(loss_fn, "λ", None)
-                    if isinstance(λ, torch.Tensor):
-                        sel = λ.detach().cpu()[ids]
-                        if sel.dim() == 1:
-                            row.update({
-                                "λ_min": float(sel.min().item()),
-                                "λ_mean": float(sel.mean().item()),
-                                "λ_max": float(sel.max().item()),
-                            })
-                        else:
-                            means = sel.float().mean(dim=0); mins = sel.min(dim=0).values; maxs = sel.max(dim=0).values
-                            for h in range(means.numel()):
-                                row[f"λ_min_h{h}"]  = float(mins[h].item())
-                                row[f"λ_mean_h{h}"] = float(means[h].item())
-                                row[f"λ_max_h{h}"]  = float(maxs[h].item())
-                    # ρ for JAGeR-mixture (1 per head per sample), if present
-                    ρ = getattr(loss_fn, "ρ", None)
-                    if isinstance(ρ, torch.Tensor):
-                        sel = ρ.detach().cpu()[ids]
-                        means = sel.float().mean(dim=0); mins = sel.min(dim=0).values; maxs = sel.max(dim=0).values
-                        for h in range(means.numel()):
-                            row[f"ρ_min_h{h}"]  = float(mins[h].item())
-                            row[f"ρ_mean_h{h}"] = float(means[h].item())
-                            row[f"ρ_max_h{h}"]  = float(maxs[h].item())
-                    # append
-                    path = os.path.join(args.save_dir, "epoch_stats.csv")
-                    is_new = not os.path.exists(path)
-                    cols = ["epoch"] + [k for k in row.keys() if k != "epoch"]
-                    with open(path, "a", newline="") as f:
-                        w = csv.DictWriter(f, fieldnames=cols)
-                        if is_new: w.writeheader()
-                        w.writerow(row)
-
-                    # Log epoch_stats.csv as a separate artifact (avoid duplicating best.pt)
-                    if run_wandb is not None:
-                        try:
-                            stats_path = os.path.join(args.save_dir, "epoch_stats.csv")
-                            art = wandb.Artifact(  # type: ignore[union-attr]
-                                f"epoch-stats-{args.loss}-j{int(args.joint)}-m{int(args.mixture)}"
-                                f"-cg{int(args.conf_gating)}-ra{int(args.reassignment)}",
-                                type="metrics",
-                                metadata={"epoch": int(epoch)}
-                            )
-                            art.add_file(stats_path)
-                            wandb.log_artifact(art)  # type: ignore[union-attr]
-                        except Exception as e:
-                            print("[W&B] epoch-stats artifact log skipped:", e)
-
 
             # TEST evaluation on improve (even if we didn't save): reload best.pt iff it exists
             if args.eval_test and improved and dl_test is not None:
@@ -1201,6 +1167,7 @@ def main():
                     unwrap(model), dl_test, loss_fn, device, args
                 )
                 if is_main_process():
+                    current_static_stats = _current_static_stats()
                     # average QWK across heads (test)
                     tavg_qwk = float(sum(tqwks) / len(tqwks)) if len(tqwks) else float("nan")
 
@@ -1262,7 +1229,7 @@ def main():
                             ]
                         }
                     }
-                    metrics.setdefault("extra", {})["static_stats"] = static_stats
+                    metrics.setdefault("extra", {})["static_stats"] = current_static_stats
                     with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
                         json.dump(metrics, f, indent=2)
                     print(f"[TEST] wrote {os.path.join(args.save_dir, 'metrics.json')}")
@@ -1313,43 +1280,28 @@ def main():
             print(f"[oof] wrote ensembled OOF-val predictions: {oof_path}")
 
 
-        if dl_val is not None:
+        if is_main_process() and last_val_metrics is not None:
             try:
-                v_loss, v_cms, v_qwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
-                    model.module if is_dist() else model,
-                    dl_val, loss_fn, device, args
-                )
-                if is_main_process():
-                    p = os.path.join(args.save_dir, "metrics.json")
-                    obj = {}
-                    if os.path.exists(p):
-                        with open(p) as f:
-                            try:
-                                obj = json.load(f)
-                            except Exception:
-                                obj = {}
-                    v_avg_qwk = float(sum(v_qwks) / len(v_qwks)) if len(v_qwks) else float("nan")
-                    final_val = {
-                        "loss": v_loss,
-                        "qwk": v_qwks,
-                        "qwk_average": v_avg_qwk,
-                        "cm": [cm.tolist() for cm in v_cms],
-                        "emd": v_emds,
-                        "macroEMD": v_macro_emd,
-                        "tail_recall0": v_tails,
-                        "tail_recall0_average": v_tails_avg,
-                    }
-                    # If best-epoch VAL metrics were already written (from eval_test on improve),
-                    # keep them as-is and store final-epoch VAL metrics separately.
-                    if "val" in obj:
-                        obj.setdefault("extra", {})["val_final"] = final_val
-                    else:
-                        obj["val"] = final_val
+                final_static_stats = _current_static_stats()
+                p = os.path.join(args.save_dir, "metrics.json")
+                obj = {}
+                if os.path.exists(p):
+                    with open(p) as f:
+                        try:
+                            obj = json.load(f)
+                        except Exception:
+                            obj = {}
+                # If best-epoch VAL metrics were already written (from eval_test on improve),
+                # keep them as-is and store final-epoch VAL metrics separately.
+                if "val" in obj:
+                    obj.setdefault("extra", {})["val_final"] = last_val_metrics
+                else:
+                    obj["val"] = last_val_metrics
 
-                    obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", static_stats)
-                    with open(p, "w") as f:
-                        json.dump(obj, f, indent=2)
-                    print(f"[VAL] updated {p}")
+                obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", final_static_stats)
+                with open(p, "w") as f:
+                    json.dump(obj, f, indent=2)
+                print(f"[VAL] updated {p}")
             except Exception as e:
                 print(f"[warn] could not append VAL metrics: {e}")
 

@@ -31,7 +31,7 @@ class JAGeRLoss(nn.Module):
     λmin: float | None = None, # overrides α
     α: float = 2,
     C: float = 1,
-    debug: bool = True,
+    debug: bool = False,
     log_to_wandb: bool = False,
     ):
       device = Y.device
@@ -261,6 +261,7 @@ class JAGeRLoss(nn.Module):
     return -(p * log_q).sum(dim=-1)
 
   def _all_gather_equal(self, x: torch.Tensor) -> torch.Tensor:
+    x = x.contiguous()
     if not (dist.is_available() and dist.is_initialized()):
       return x
     world_size = dist.get_world_size()

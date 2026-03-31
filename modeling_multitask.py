@@ -27,13 +27,26 @@ class MultiHeadDeberta(nn.Module):
             local_files_only=local_files_only,
             trust_remote_code=trust_remote_code,
         )
-        self.encoder = AutoModel.from_pretrained(
-            model_name,
+        # Keep master weights in fp32 by default. We still use bf16/fp16 compute
+        # via autocast during training, and JAGeR casts logits to fp64 for loss math.
+        load_dtype = torch.float32 if torch_dtype is None else torch_dtype
+        load_kwargs = dict(
             config=self.config,
             local_files_only=local_files_only,
             trust_remote_code=trust_remote_code,
-            torch_dtype=torch_dtype,
         )
+        try:
+            self.encoder = AutoModel.from_pretrained(
+                model_name,
+                dtype=load_dtype,
+                **load_kwargs,
+            )
+        except TypeError:
+            self.encoder = AutoModel.from_pretrained(
+                model_name,
+                torch_dtype=load_dtype,
+                **load_kwargs,
+            )
         if enable_grad_ckpt:
             if hasattr(self.encoder.config, "use_cache"):
                 self.encoder.config.use_cache = False

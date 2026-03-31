@@ -1,16 +1,16 @@
 #!/bin/bash -l
 #SBATCH -p a100 
-#SBATCH --job-name=jager_dress_cv_k6_40ep_ce
+#SBATCH --job-name=jager_dress_cv_k6_40ep
 ## SBATCH --job-name=jager_dress_cv_k6_jager0100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=44G
-#SBATCH --time=01:00:00
+#SBATCH --time=04:30:00
 #SBATCH --array=0-5
-#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep_ce.out
-#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep_ce.err
+#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep.out
+#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep.err
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au  	# Email to which notifications will be sent
 
@@ -57,33 +57,33 @@ DATA_PATH="$SCRIPT_DIR/../data/DREsS/DREsS_New_cleaned.tsv"
 MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
 EPOCHS=40
-T=10
 BATCH=8
 ACCUM=2
 MAXLEN=808
+JAGER_DEBUG=1
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
         --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
-        --use_fast_tokenizer --num_workers 4 --prefetch_factor 4
-        --ens_t "$T" --ens_stride 1 --log_epoch_stats)
+        --num_workers 4 --prefetch_factor 4)
 
-export OMP_NUM_THREADS=4
+export OMP_NUM_THREADS=1
+export JAGeR_DEBUG="$JAGER_DEBUG"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_SHOW_CPP_STACKTRACES=1
 
 JOBS=(
   "ce"
   "ce --ce_label_smoothing 0.1"
-  # "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
 )
 
 # ---- Fold selection (one fold per array task) -------------------------------
@@ -112,11 +112,13 @@ count=$(ls -1 "$SPLITS_DIR"/fold*.json 2>/dev/null | wc -l | tr -d ' ')
 
 [[ -f "$DATA_PATH" ]] || { echo "ERROR: data file missing: $DATA_PATH"; exit 1; }
 [[ -d "$MODEL" ]] || echo "[note] MODEL dir not found; HF might download."
+[[ -f "$MODEL/tokenizer.json" ]] || { echo "ERROR: saved fast tokenizer missing: $MODEL/tokenizer.json"; exit 1; }
 
 splits_name="$(basename "$SPLITS_DIR")"
 RESULTS_ROOT="$SCRIPT_DIR/../results/${splits_name}/${SLURM_ARRAY_JOB_ID}"
 mkdir -p "$RESULTS_ROOT"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
+echo "[check] tokenizer.json present at $MODEL/tokenizer.json"
 
 MASTER_PORT=$((29500 + FOLD))
 
