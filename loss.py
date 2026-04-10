@@ -560,43 +560,37 @@ class JAGeRLoss(nn.Module):
       thresholds = self._base_thresholds.unsqueeze(0).expand(B, *self._base_thresholds.shape)
       if joint:
         _1hot_label = torch.zeros_like(thresholds, dtype=thresholds.dtype)
-        idx_label = (torch.arange(B, device=y_pred.device), *Y.unbind(1))
-        _1hot_label[idx_label] = 1.
+        batch_idx = torch.arange(B, device=y_pred.device)
+        _1hot_label[batch_idx, *Y.T] = 1.
         if reassignment:
           _1hot_pred_max = torch.zeros_like(thresholds, dtype=thresholds.dtype)
-          idx_pred_max = (torch.arange(B, device=y_pred.device), *_mode.unbind(1))
-          _1hot_pred_max[idx_pred_max] = 1.
+          _1hot_pred_max[batch_idx, *_mode.T] = 1.
           _1hot_pred_max = _1hot_pred_max.view(B, -1)
         thresholds = thresholds.view(B, -1)
         _1hot_label = _1hot_label.view(B, -1)
-        if reassignment:
-          c = thresholds - (thresholds + λt_unsq*log_υ).mul(
-            _1hot_label + ρ_sq.unsqueeze(-1).mul(_1hot_pred_max - _1hot_label))
-        elif mixture:
-          c = thresholds - (thresholds + λt_unsq*log_υ).mul(_1hot_label)
-        else:
-          c = thresholds - thresholds.mul(_1hot_label)
       else:
-        _1hot_label = F.one_hot(Y, K)
+        _1hot_label = F.one_hot(Y, K).to(thresholds.dtype)
         if reassignment:
-          _1hot_pred_max = F.one_hot(_mode, K)
-          c = (
-            thresholds - (thresholds + λt_unsq*log_υ).mul(_1hot_label) -
-            (ρ_sq.unsqueeze(-1) * thresholds + 
-            λt_unsq*(ρ_sq.unsqueeze(-1)*log_υ)).mul(_1hot_pred_max - _1hot_label)
-          )
-        elif mixture:
-          c = thresholds - (thresholds + λt_unsq*log_υ).mul(_1hot_label)
-        else:
-          c = thresholds - thresholds.mul(_1hot_label)
+          _1hot_pred_max = F.one_hot(_mode, K).to(thresholds.dtype)
       
+      payload = thresholds + λt_unsq * log_υ if mixture else thresholds
+      mass = torch.lerp(_1hot_label, _1hot_pred_max, ρ_sq[..., None]) if reassignment else _1hot_label
+      c = thresholds - payload * mass
     
-    y_label = y_pred.gather(2, Y.unsqueeze(-1))  
-    y_pred = y_pred - y_label 
-    if reassignment:
-      y_pred = y_pred - (ρ_sq[..., None, None] if joint else ρ_sq[..., None]) * y_pred.gather(2, _mode_unsq)
-    if joint: 
-      y_pred = self._outer_sum(y_pred, flat=False).view(B, -1) 
+    if joint:
+      y_pred = self._outer_sum(y_pred, flat=False)
+      y_label = y_pred[batch_idx, *Y.T].unsqueeze(-1)
+      if reassignment:
+        y_pred_max = y_pred[batch_idx, *_mode.T].unsqueeze(-1)
+      y_pred = y_pred.flatten(1)
+    else:
+      y_label = y_pred.gather(2, Y.unsqueeze(-1))
+      if reassignment:
+        y_pred_max = y_pred.gather(2, _mode_unsq)
+
+    ref = torch.lerp(y_label, y_pred_max, ρ_sq[..., None]) if reassignment else y_label
+    y_pred = y_pred - ref
+
     diff_logits = y_pred + c 
     diff_logits_lam_fix = diff_logits / λt_unsq
     if mixture:

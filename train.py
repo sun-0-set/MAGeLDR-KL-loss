@@ -252,6 +252,12 @@ def parse_args():
                    help="Force offline mode and local files only for HF")
     p.add_argument("--max_length", type=int, default=1024)
     p.add_argument("--pad_to_multiple_of", type=int, default=8, help="dynamic padding grid")
+    p.add_argument(
+        "--token_cache_dir",
+        type=str,
+        default=None,
+        help="Reusable on-disk token cache directory (default: alongside the data file).",
+    )
 
     # --- DataLoader / perf ------------------------------------------------
     p.add_argument("--num_workers", type=int, default=2)
@@ -614,7 +620,11 @@ def main():
             tokenizer_name=args.model_name,
             max_length=args.max_length,
             tokenizer=tok,
+            token_cache_dir=args.token_cache_dir,
         )
+        if is_main_process():
+            cache_state = "built" if ds.cache_built else "loaded"
+            print(f"[data] token_cache={cache_state} path={ds.cache_dir} rows={len(ds)}")
         target_cols = ds.target_cols
         num_heads = len(target_cols)
         Y_all_cpu = ds.get_all_targets_tensor()
@@ -714,7 +724,7 @@ def main():
             pin_memory=pin, collate_fn=collate, prefetch_factor=_pf,
         )
         dl_test = None
-        if ds_test is not None:
+        if args.eval_test and ds_test is not None:
             dl_test = DataLoader(
                 ds_test, batch_size=args.batch_size, shuffle=False,
                 sampler=test_sampler,
@@ -870,11 +880,11 @@ def main():
             if is_main_process() and run_wandb is not None:
                 _log_static_stats_to_wandb(static_stats)
 
+            payload = None
             val_loss, vcms, vqwks, v_emds, v_macro_emd, v_tails, v_tails_avg = evaluate(
                 model.module if is_dist() else model,
                 dl_val, loss_fn, device, args=args
             )
-            payload = None
             if is_main_process():
                 v_avg_qwk = float(sum(vqwks)/len(vqwks)) if len(vqwks) else float("nan")
                 payload = {
@@ -1023,7 +1033,6 @@ def main():
                 dl_val, loss_fn, device, args, return_payload=True
             )
             avg_qwk = float("nan")
-
             if is_main_process():
                 val_pred_epochs.append({"epoch": int(epoch), "ids": ids_e, "y": y_e, "p": p_e})
                 last_val_metrics = {

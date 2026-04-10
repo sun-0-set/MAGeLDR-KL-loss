@@ -1,16 +1,16 @@
 #!/bin/bash -l
 #SBATCH -p a100 
-#SBATCH --job-name=jager_dress_cv_k6_40ep
+#SBATCH --job-name=jager_dress_cv_k6_40ep_ce
 ## SBATCH --job-name=jager_dress_cv_k6_jager0100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=44G
-#SBATCH --time=04:30:00
+#SBATCH --mem=96G
+#SBATCH --time=01:00:00
 #SBATCH --array=0-5
-#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep.out
-#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep.err
+#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep_ce.out
+#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep_ce.err
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au  	# Email to which notifications will be sent
 
@@ -60,7 +60,7 @@ EPOCHS=40
 BATCH=8
 ACCUM=2
 MAXLEN=808
-JAGER_DEBUG=1
+JAGER_DEBUG=1 
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
         --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
@@ -74,16 +74,16 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 JOBS=(
   "ce"
   "ce --ce_label_smoothing 0.1"
-  "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --joint --mixture --no-conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  # "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --no-joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --joint --mixture --no-conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  # "jager --joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
 )
 
 # ---- Fold selection (one fold per array task) -------------------------------
@@ -121,6 +121,9 @@ echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
 echo "[check] tokenizer.json present at $MODEL/tokenizer.json"
 
 MASTER_PORT=$((29500 + FOLD))
+FAIL_COUNT=0
+FAIL_SUMMARY="$RESULTS_ROOT/fold${FOLD}.failed_jobs.txt"
+rm -f "$FAIL_SUMMARY"
 
 # ---- Loop over loss configs for this fold -----------------------------------
 
@@ -158,9 +161,16 @@ for job in "${JOBS[@]}"; do
   echo "$code" > "$SAVE/.exit_code"
 
   if [[ "$code" != 0 ]]; then
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf '%s\t%s\t%s\n' "$TAG" "$code" "$LOG" >> "$FAIL_SUMMARY"
     echo "!! [fold ${FOLD}] ${TAG} FAILED (code $code). See $LOG"
   fi
   set -e
 done
+
+if (( FAIL_COUNT > 0 )); then
+  echo "[summary] Fold ${FOLD} finished with ${FAIL_COUNT} failed run(s). See $FAIL_SUMMARY"
+  exit 1
+fi
 
 echo "[done] Fold ${FOLD} finished. Results in: $RESULTS_ROOT"
