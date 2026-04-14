@@ -77,11 +77,11 @@ JOBS=(
   "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
   "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
   "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --no-joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "jager --no-joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
   "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
   "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
   "jager --joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "jager --joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
 )
 
 # ---- Fold selection (one fold per array task) -------------------------------

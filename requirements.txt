@@ -12,3 +12,4 @@ iterative-stratification
 scipy
 tqdm
 wandb
+matplotlib

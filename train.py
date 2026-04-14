@@ -90,6 +90,34 @@ def _log_static_stats_to_wandb(static_stats):
     wandb.log(flat, step=-1)  # type: ignore[union-attr]
 
 
+def _configure_wandb_metrics():
+    if wandb is None or wandb.run is None:
+        return
+
+    wandb.define_metric("epoch")  # type: ignore[union-attr]
+    epoch_metrics = (
+        "train/loss_epoch",
+        "val/loss",
+        "val/qwk_average",
+        "val/macroEMD",
+        "val/mEMD",
+        "val/tail_recall0_average",
+        "val/qwk_*",
+        "val/emd_*",
+        "val/tail_recall0_*",
+        "test/loss",
+        "test/qwk_average",
+        "test/macroEMD",
+        "test/mEMD",
+        "test/tail_recall0_average",
+        "test/qwk_*",
+        "test/emd_*",
+        "test/tail_recall0_*",
+    )
+    for metric_name in epoch_metrics:
+        wandb.define_metric(metric_name, step_metric="epoch")  # type: ignore[union-attr]
+
+
 def _dedupe_by_id(ids: "torch.Tensor", *tensors: "torch.Tensor"):
     if ids.numel() == 0:
         return (ids, *tensors)
@@ -306,6 +334,11 @@ def parse_args():
     p.add_argument("--wandb_project", type=str, default="jager", help="W&B project name")
     p.add_argument("--wandb_entity", type=str, default=None, help="W&B entity (team) or None")
     p.add_argument("--wandb_mode", type=str, default="online", choices=["online","offline","disabled"], help="W&B mode")
+    p.add_argument("--wandb_group", type=str, default=None, help="Optional W&B run group")
+    p.add_argument("--wandb_job_type", type=str, default=None, help="Optional W&B job type")
+    p.add_argument("--wandb_run_name", type=str, default=None, help="Optional explicit W&B run name")
+    p.add_argument("--wandb_run_id", type=str, default=None, help="Optional explicit W&B run id for resume")
+    p.add_argument("--wandb_tags", type=str, default=None, help="Comma-separated extra W&B tags")
 
     return p.parse_args()
 
@@ -477,18 +510,38 @@ def _maybe_init_wandb(args):
     if not _WANDB_OK:
         print("[W&B] wandb not installed; proceeding without logging.")
         return None
-    run = wandb.init(  # type: ignore[union-attr]
+    default_name = (
+        f"{args.loss}-j{int(args.joint)}-m{int(args.mixture)}-cg{int(args.conf_gating)}-ra{int(args.reassignment)}"
+        f"-bs{args.batch_size}-ga{args.grad_accum}"
+    )
+    tags = [
+        args.loss,
+        f"joint={int(args.joint)}",
+        f"mixture={int(args.mixture)}",
+        f"conf_gating={int(args.conf_gating)}",
+        f"reassign={int(args.reassignment)}",
+    ]
+    if args.wandb_tags:
+        tags.extend([tag.strip() for tag in args.wandb_tags.split(",") if tag.strip()])
+
+    init_kwargs = dict(
         project=args.wandb_project,
         entity=args.wandb_entity or None,
         mode=args.wandb_mode,
-        name=f"{args.loss}-j{int(args.joint)}-m{int(args.mixture)}-cg{int(args.conf_gating)}-ra{int(args.reassignment)}"
-             f"-bs{args.batch_size}-ga{args.grad_accum}",
-        tags=[args.loss,
-              f"joint={int(args.joint)}", f"mixture={int(args.mixture)}",
-              f"conf_gating={int(args.conf_gating)}", f"reassign={int(args.reassignment)}"],
-
+        name=args.wandb_run_name or default_name,
+        group=args.wandb_group or None,
+        job_type=args.wandb_job_type or None,
+        tags=tags,
         config=vars(args),
     )
+    if args.wandb_run_id:
+        init_kwargs["id"] = args.wandb_run_id
+        init_kwargs["resume"] = "allow"
+
+    run = wandb.init(  # type: ignore[union-attr]
+        **init_kwargs,
+    )
+    _configure_wandb_metrics()
     return run
 
 
@@ -496,7 +549,11 @@ def _log_cms_as_wandb_images(cms, split: str, head_names, level_offset: int, ste
         
     if wandb is None or wandb.run is None:
         return
-    import matplotlib.pyplot as plt  # type: ignore[import-not-found]
+    try:
+        import matplotlib.pyplot as plt  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        print("[W&B] matplotlib not installed; skipping confusion-matrix images.")
+        return
     if not cms:
         return
     if head_names is None:
@@ -571,6 +628,8 @@ def main():
     if args.loss == "jager" and not args.mixture:
         args.conf_gating = False
         args.reassignment = False
+    if args.loss == "jager" and args.reassignment and not args.conf_gating:
+        raise ValueError("JAGeR reassignment requires --conf_gating.")
 
     if os.path.sep in args.model_name or args.model_name.startswith("."):
         args.model_name = os.path.abspath(os.path.expanduser(args.model_name))
@@ -1058,12 +1117,14 @@ def main():
                 )
                 if run_wandb is not None:
                     log = {
+                        "epoch": int(epoch),
                         "train/loss_epoch": float(
                             running / max(1, math.ceil(len(dl_train) / args.grad_accum))
                         ),
                         "val/loss": float(val_loss),
                         "val/qwk_average": float(avg_qwk),
                         "val/macroEMD": float(macro_emd),
+                        "val/mEMD": float(macro_emd),
                         "val/tail_recall0_average": float(tail_recall_avg),
                     }
                     for h, name in enumerate(head_names):
@@ -1192,9 +1253,11 @@ def main():
 
                     if run_wandb is not None:
                         log = {
+                            "epoch": int(epoch),
                             "test/loss": float(test_loss),
                             "test/qwk_average": float(tavg_qwk),
                             "test/macroEMD": float(tmacro_emd),
+                            "test/mEMD": float(tmacro_emd),
                             "test/tail_recall0_average": float(ttails_avg),
                         }
                         for h, name in enumerate(head_names):

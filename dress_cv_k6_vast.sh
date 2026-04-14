@@ -25,6 +25,13 @@ Environment overrides:
   GRAD_CKPT        1 to enable --grad_ckpt if memory is tight (default: 0)
   JOB_SET          full (default) or ce_only
   RESUME           1 to skip jobs with .exit_code == 0 (default: 1)
+  WANDB_ENABLED    1 to enable W&B logging (default: 0)
+  WANDB_PROJECT    W&B project name (default: jager)
+  WANDB_ENTITY     W&B entity/team (default: unset)
+  WANDB_MODE       online/offline/disabled (default: online)
+  WANDB_GROUP      W&B group; default is RUN_ID
+  WANDB_JOB_TYPE   W&B job type (default: train)
+  WANDB_TAGS       Extra comma-separated W&B tags
   EXTRA_ARGS       Extra args appended to train.py for all jobs
 
 Examples:
@@ -70,6 +77,13 @@ SAVE_MODEL="${SAVE_MODEL:-0}"
 GRAD_CKPT="${GRAD_CKPT:-0}"
 JOB_SET="${JOB_SET:-full}"
 RESUME="${RESUME:-1}"
+WANDB_ENABLED="${WANDB_ENABLED:-0}"
+WANDB_PROJECT="${WANDB_PROJECT:-jager}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_MODE="${WANDB_MODE:-online}"
+WANDB_GROUP="${WANDB_GROUP:-$RUN_ID}"
+WANDB_JOB_TYPE="${WANDB_JOB_TYPE:-train}"
+WANDB_TAGS="${WANDB_TAGS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 MASTER_PORT_BASE="${MASTER_PORT_BASE:-29500}"
 
@@ -100,6 +114,16 @@ if [[ "$GRAD_CKPT" == "1" ]]; then
   COMMON+=(--grad_ckpt)
 fi
 
+if [[ "$WANDB_ENABLED" == "1" ]]; then
+  COMMON+=(--wandb --wandb_project "$WANDB_PROJECT" --wandb_mode "$WANDB_MODE" --wandb_group "$WANDB_GROUP" --wandb_job_type "$WANDB_JOB_TYPE")
+  if [[ -n "$WANDB_ENTITY" ]]; then
+    COMMON+=(--wandb_entity "$WANDB_ENTITY")
+  fi
+  if [[ -n "$WANDB_TAGS" ]]; then
+    COMMON+=(--wandb_tags "$WANDB_TAGS")
+  fi
+fi
+
 EXTRA_ARGS_ARR=()
 if [[ -n "$EXTRA_ARGS" ]]; then
   read -r -a EXTRA_ARGS_ARR <<<"$EXTRA_ARGS"
@@ -110,6 +134,9 @@ export JAGeR_DEBUG="$JAGER_DEBUG"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TORCH_SHOW_CPP_STACKTRACES="${TORCH_SHOW_CPP_STACKTRACES:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export WANDB_DIR="${WANDB_DIR:-$RESULTS_ROOT/.wandb}"
+export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$RESULTS_ROOT/.wandb_cache}"
+mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR"
 
 case "$JOB_SET" in
   ce_only)
@@ -152,6 +179,7 @@ echo "[info] PWD=$PWD"
 echo "[info] RUN_ID=$RUN_ID FOLD=$FOLD NPROC_PER_NODE=$NPROC_PER_NODE"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
 echo "[info] BATCH=$BATCH ACCUM=$ACCUM JOB_SET=$JOB_SET RESUME=$RESUME"
+echo "[info] WANDB_ENABLED=$WANDB_ENABLED WANDB_MODE=$WANDB_MODE WANDB_GROUP=$WANDB_GROUP"
 echo "[info] host=$(hostname)"
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
@@ -209,6 +237,7 @@ for job in "${JOBS[@]}"; do
     --nproc_per_node="$NPROC_PER_NODE" \
     --master_port="$MASTER_PORT" \
     "$SCRIPT_DIR/train.py" "${COMMON[@]}" \
+      --wandb_run_name "${RUN_ID}-fold${FOLD}-${TAG}" \
       "${EXTRA_ARGS_ARR[@]}" \
       --loss "$LOSS" "${ARGS_ARR[@]}" \
       --split_file "${SPLITS_DIR}/fold${FOLD}.json" \

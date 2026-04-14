@@ -18,3 +18,4 @@ iterative-stratification==0.1.9
 scipy==1.17.1
 tqdm==4.67.3
 wandb==0.25.1
+matplotlib==3.10.7
