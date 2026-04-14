@@ -23,9 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY envs/jager-cv-hf4572-requirements.txt /tmp/requirements-vast.txt
 COPY bootstrap_vast_workspace.sh /usr/local/bin/bootstrap_vast_workspace.sh
 
-RUN python -m pip install --upgrade pip && \
+RUN python3 -m pip install --upgrade pip && \
     grep -vE '^\s*(#|$|torch==)' /tmp/requirements-vast.txt > /tmp/requirements-no-torch.txt && \
-    python -m pip install -r /tmp/requirements-no-torch.txt
+    python3 -m pip install -r /tmp/requirements-no-torch.txt
 
 RUN chmod +x /usr/local/bin/bootstrap_vast_workspace.sh
 
