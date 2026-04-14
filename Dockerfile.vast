@@ -7,6 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TOKENIZERS_PARALLELISM=false \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
     HF_HOME=/workspace/.cache/huggingface \
     HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub \
     TRANSFORMERS_CACHE=/workspace/.cache/huggingface/transformers
@@ -16,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git-lfs \
     htop \
     openssh-client \
+    python3-venv \
     rsync \
     tmux \
     && rm -rf /var/lib/apt/lists/*
@@ -23,9 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY envs/jager-cv-hf4572-requirements.txt /tmp/requirements-vast.txt
 COPY bootstrap_vast_workspace.sh /usr/local/bin/bootstrap_vast_workspace.sh
 
-RUN python3 -m pip install --upgrade pip && \
+RUN python3 -m venv "$VIRTUAL_ENV"
+
+RUN python -m pip install --upgrade pip && \
     grep -vE '^\s*(#|$|torch==)' /tmp/requirements-vast.txt > /tmp/requirements-no-torch.txt && \
-    python3 -m pip install -r /tmp/requirements-no-torch.txt
+    python -m pip install -r /tmp/requirements-no-torch.txt
 
 RUN chmod +x /usr/local/bin/bootstrap_vast_workspace.sh
 
