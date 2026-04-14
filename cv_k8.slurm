@@ -64,8 +64,8 @@ MAXLEN=1024
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
         --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
-        --use_fast_tokenizer --num_workers 4 --prefetch_factor 4
-        --ens_t "$T" --ens_stride 1 --log_epoch_stats)
+        --num_workers 4 --prefetch_factor 4
+        --ens_t "$T" --ens_stride 1)
 
 export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"

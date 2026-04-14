@@ -37,7 +37,7 @@ Expect the following to change as experiments evolve:
 
 ## Data Assumptions
 
-The DREsS dataset is not included in the repository but us available publicly [here](https://haneul-yoo.github.io/dress/).
+The DREsS dataset is not included in the repository but is available publicly [here](https://haneul-yoo.github.io/dress/).
 
 Training expects a CSV or TSV with:
 
@@ -57,7 +57,7 @@ By default, [train.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/train.py) lo
 - [loss.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/loss.py): loss implementations and ablation logic
 - [modeling_multitask.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/modeling_multitask.py): shared encoder with one head per trait
 - [make_prompt_cv_splits.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/make_prompt_cv_splits.py): prompt-grouped CV split generation
-- [launch_cv_k6.sh](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/launch_cv_k6.sh) and [dress_cv_k6.slurm](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/dress_cv_k6.slurm): example ablation sweeps
+- [dress_cv_k6.slurm](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/dress_cv_k6.slurm) and [dress_cv_k6_vast.sh](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/dress_cv_k6_vast.sh): cluster and Vast.ai ablation sweeps
 - [utils/aggregate_results.py](/scratchdata1/users/a1841939/MAGeLDR-KL-loss/utils/aggregate_results.py): collect per-run `metrics.json` files
 
 ## Minimal Setup
