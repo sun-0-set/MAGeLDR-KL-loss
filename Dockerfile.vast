@@ -1,0 +1,36 @@
+FROM vastai/pytorch:2.6.0-cuda-12.6.3-py312
+
+SHELL ["/bin/bash", "-lc"]
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TOKENIZERS_PARALLELISM=false \
+    HF_HOME=/workspace/.cache/huggingface \
+    HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub \
+    TRANSFORMERS_CACHE=/workspace/.cache/huggingface/transformers
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    git-lfs \
+    htop \
+    openssh-client \
+    rsync \
+    tmux \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY envs/jager-cv-hf4572-requirements.txt /tmp/requirements-vast.txt
+COPY bootstrap_vast_workspace.sh /usr/local/bin/bootstrap_vast_workspace.sh
+
+RUN python -m pip install --upgrade pip && \
+    grep -vE '^\s*(#|$|torch==)' /tmp/requirements-vast.txt > /tmp/requirements-no-torch.txt && \
+    python -m pip install -r /tmp/requirements-no-torch.txt
+
+RUN chmod +x /usr/local/bin/bootstrap_vast_workspace.sh
+
+RUN git lfs install --system || true
+
+WORKDIR /workspace
+
+CMD ["/bin/bash"]

@@ -34,11 +34,9 @@ JOBS=(
   "jager --joint --no-mixture --no-conf_gating --no-reassignment"
   "jager --no-joint --mixture --no-conf_gating --no-reassignment"
   "jager --no-joint --mixture --conf_gating --no-reassignment"
-  "jager --no-joint --mixture --no-conf_gating --reassignment"
   "jager --no-joint --mixture --conf_gating --reassignment"
   "jager --joint --mixture --no-conf_gating --no-reassignment"
   "jager --joint --mixture --conf_gating --no-reassignment"
-  "jager --joint --mixture --no-conf_gating --reassignment"
   "jager --joint --mixture --conf_gating --reassignment"
 )
 

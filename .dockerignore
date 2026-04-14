@@ -1,0 +1,14 @@
+.git
+.gitignore
+.smoke
+.vscode
+__pycache__
+tmp_smoke
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+results
+models
+data
+slurm_logs

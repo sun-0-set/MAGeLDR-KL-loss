@@ -77,11 +77,9 @@ JOBS=(
   # "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
   "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
   # "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
-  # "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 3 --alpha 1.25"
   # "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --alpha 1.25"
   # "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
   # "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
-  # "jager --joint --mixture --no-conf_gating --reassignment --lambda0 3 --alpha 1.25"
   # "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --alpha 1.25"
 )
 

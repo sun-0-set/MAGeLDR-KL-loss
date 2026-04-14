@@ -61,6 +61,8 @@ class JAGeRLoss(nn.Module):
         raise ValueError("λmin must be positive and less than λ0")
       if K < 4:
         raise ValueError("K must be at least 4.")
+      if reassignment and not conf_gating:
+        raise ValueError("Competitor reassignment requires 'conf_gating' to be True.")
       if (reassignment or conf_gating) and not mixture:
         raise ValueError("Competitor reassignment and confidence gating require 'mixture' to be True.")
       
@@ -97,6 +99,7 @@ class JAGeRLoss(nn.Module):
       if joint:
         KpowH = self.KpowH = K**self.H
         self.HlogK = self.H * self.logK
+        self.flat_factors = K ** torch.arange(self.H - 1, -1, -1, device=device, dtype=torch.long)
         
       if mixture:
         self.ρ: torch.Tensor
@@ -115,15 +118,9 @@ class JAGeRLoss(nn.Module):
           for _ in range(1, self.H):
             Z = Z.unsqueeze(-1) * z
           ker_shell = (-(φ_sq_inv_halved[K-4] if K<=10 else .5) * torch.arange(self.H * R_max + 1, device=device, dtype=torch.float64)).exp_()
-          self.Kπminus1 = KpowH*ker_shell.view(*[1]*self.H, self.H*R_max+1)/Z.unsqueeze(-1) - 1
-          try:
-            self.Kπminus1_rec = self.Kπminus1.reciprocal()
-            assert not (self.Kπminus1_rec.isnan().any() or self.Kπminus1_rec.isinf().any()), "Kπminus1 contains zero values, cannot compute reciprocal."
-          except Exception as e:
-            print("Error computing reciprocal of Kπminus1:", e)
-            print("Kπminus1:", self.Kπminus1)
-            raise
-          self.factors = K ** torch.arange(self.H, device=device, dtype=torch.long)
+          self.Kπ: torch.Tensor
+          self.register_buffer('Kπ', KpowH * ker_shell.view(*[1] * self.H, self.H * R_max + 1) / Z.unsqueeze(-1))
+          self.factors = self.flat_factors
         else:
           π = _trunc_disc_norm_grid(K)
           self.Kπminus1 = K*π - 1
@@ -200,6 +197,7 @@ class JAGeRLoss(nn.Module):
       _base = (
         (self._level_comb_counts(stats_Y, K).add(1) if joint else (self.level_counts if conf_gating else self._level_counts(stats_Y, K)))
           .to(torch.float64)
+          .clamp_min(1)
           .rsqrt().sqrt()
           .mul(C)
       )
@@ -209,9 +207,9 @@ class JAGeRLoss(nn.Module):
 
   def _level_comb_counts(self, Y, K):
     H = Y.shape[1]
-    base = torch.full((H,), K, dtype=torch.long, device=Y.device)
-    exp = torch.arange(H, dtype=torch.long, device=Y.device)
-    factors = torch.pow(base, exp)
+    # Keep the flattened class order consistent with `flat_factors` and
+    # the row-major layout produced by `.view(-1)` on the joint tensor.
+    factors = K ** torch.arange(H - 1, -1, -1, dtype=torch.long, device=Y.device)
     flat_idx = (Y * factors).sum(dim=1)
     counts_flat = torch.bincount(flat_idx, minlength=K**H)
     return counts_flat.view([K]*H)
@@ -233,6 +231,40 @@ class JAGeRLoss(nn.Module):
       return joint
     # reshape back to (B, K, .., K)
     return joint.view(B, *([K] * H))
+
+
+  def _joint_shell_mass_fft(self, p_shell_h: torch.Tensor) -> torch.Tensor:
+    # Full H-fold convolution of the per-head shell masses along the squared-distance axis.
+    out_len = p_shell_h.shape[1] * (p_shell_h.shape[-1] - 1) + 1
+    spec = torch.fft.rfft(p_shell_h, n=out_len, dim=-1)
+    return torch.fft.irfft(spec.prod(dim=1), n=out_len, dim=-1)
+
+
+  def _joint_ρ_derivatives(self, p_shell: torch.Tensor, Kπ_pred_mode: torch.Tensor, ρ: torch.Tensor | None = None) -> torch.Tensor:
+    if ρ is None:
+      κ_mom1 = (p_shell * Kπ_pred_mode).sum(-1)
+      κ_mom2 = (p_shell * Kπ_pred_mode.square()).sum(-1)
+      κ_mom3 = (p_shell * Kπ_pred_mode.pow(3)).sum(-1)
+      return torch.stack((
+        κ_mom1 - 1,
+        κ_mom2 - 2 * κ_mom1 + 1,
+        κ_mom3 - 3 * κ_mom2 + 3 * κ_mom1 - 1,
+      ))
+
+    der = torch.empty((3, p_shell.shape[0]), dtype=p_shell.dtype, device=p_shell.device)
+    ρ_is_zero = ρ.eq(0)
+    if ρ_is_zero.any():
+      der[:, ρ_is_zero] = self._joint_ρ_derivatives(p_shell[ρ_is_zero], Kπ_pred_mode[ρ_is_zero], None)
+    if (~ρ_is_zero).any():
+      log_S = torch.lerp(
+        torch.ones_like(Kπ_pred_mode[~ρ_is_zero]),
+        Kπ_pred_mode[~ρ_is_zero],
+        ρ[~ρ_is_zero].unsqueeze(-1)
+      ).log()
+      ratio = -torch.expm1(-log_S) / ρ[~ρ_is_zero].unsqueeze(-1)
+      orders = torch.arange(1, 4, device=p_shell.device, dtype=p_shell.dtype)[..., None, None]
+      der[:, ~ρ_is_zero] = (p_shell[~ρ_is_zero].unsqueeze(0) * ratio.unsqueeze(0).pow(orders)).sum(-1)
+    return der
 
 
   def _cent_moments(self, probs):
@@ -258,7 +290,7 @@ class JAGeRLoss(nn.Module):
     return torch.stack(marginals_log, dim=1).exp()  # (B, H, K)
 
   def _ce(self, p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
-    return -(p * log_q).sum(dim=-1)
+    return -(p * log_q.masked_fill(p.eq(0), 0)).sum(dim=-1)
 
   def _all_gather_equal(self, x: torch.Tensor) -> torch.Tensor:
     x = x.contiguous()
@@ -397,7 +429,7 @@ class JAGeRLoss(nn.Module):
 
   def forward(self, y_pred, ids, update_state: bool = True, global_step: int | None = None):
     # y_pred: (B, H, n_levels)
-    λ0, K, H, α, logK = self.λ0, self.K, self.H, self.α, self.logK
+    λ0, K, H, α, logK, ε = self.λ0, self.K, self.H, self.α, self.logK, self.ε
     Y = self.Y[ids]
     B = y_pred.shape[0]
     λ = self.λ[ids]
@@ -425,30 +457,37 @@ class JAGeRLoss(nn.Module):
         if joint:
           p_shell_h = torch.zeros((B, H, R_max+1), dtype=torch.float64, device=y_pred.device)
           p_shell_h.scatter_add_(2, self.D[_mode].long(), p_h)
-          p_shell = p_shell_h[:, 0, :]
-          for h in range(1, H):
-            p_shell_old = p_shell
-            p_shell_old = F.pad(p_shell_old, (R_max, R_max))
-            p_shell_old = p_shell_old.unfold(-1, R_max+1, 1)
-            p_shell = (p_shell_old*p_shell_h[:, h, :].flip(-1).unsqueeze(1)).sum(-1) # convolution via flipped kernel
-          Kπminus1_rec_pred_mode = self.Kπminus1_rec[*_mode.T]
+          out_len = p_shell_h.shape[1] * (p_shell_h.shape[-1] - 1) + 1
+          spec = torch.fft.rfft(p_shell_h, n=out_len, dim=-1)
+          p_shell = torch.fft.irfft(spec.prod(dim=1), n=out_len, dim=-1)
+          Kπ_pred_mode = self.Kπ[*_mode.T]
           P_max = log_p_h_max.sum(-1).exp_()
-          ρ = ((KpowH * P_max - 1)*Kπminus1_rec_pred_mode[:,0]).clamp_(0,1)
+          der_lo = self._joint_ρ_derivatives(p_shell, Kπ_pred_mode)
+          ρ_hi_eval = torch.nextafter(torch.ones_like(P_max), torch.zeros_like(P_max))
+          der_hi0 = self._joint_ρ_derivatives(p_shell, Kπ_pred_mode, ρ_hi_eval)[0]
+          active = der_lo[0].gt(0) & der_hi0.lt(0)
+          ρ = torch.where(
+            der_lo[0].le(0),
+            torch.zeros_like(P_max),
+            torch.ones_like(P_max)
+          )
+          ρ_init = ((KpowH * P_max - 1) / Kπ_pred_mode[:, 0].sub(1)).clamp_(0,1)
+          ρ = torch.where(active, torch.minimum(ρ_init, ρ_hi_eval), ρ)
           for _ in range(10):
-            den = (ρ.unsqueeze(-1) + Kπminus1_rec_pred_mode).unsqueeze_(0).pow(torch.arange(1, 4, device=p_h.device, dtype=p_h.dtype)[..., None, None])
-            der = (p_shell.unsqueeze(0)/den).sum(-1)
-            if der[0].abs().le(self.ε).all(): break
+            if not active.any(): break
+            der = self._joint_ρ_derivatives(p_shell[active], Kπ_pred_mode[active], ρ[active])
+            if der[0].abs().le(ε).all(): break
             den = der[1].square() - der[0]*der[2]
             sgn = den.sign()
             sgn = sgn.where(sgn.ne(0), 1)
-            den.abs_().clamp_min_(self.ε).mul_(sgn)
+            den.abs_().clamp_min_(ε).mul_(sgn)
             Δρ = der[0]*der[1]/den # Halley's step
-            if Δρ.abs().le(self.ε).all(): break
-            ρ = (ρ + Δρ).clamp_(0, 1)
-          
+            if Δρ.abs().le(ε).all(): break
+            ρ_next = (ρ[active] + Δρ).clamp_min_(0)
+            ρ[active] = torch.minimum(ρ_next, ρ_hi_eval[active])
         else:
           mean, _var, _skew, _kurt = self._cent_moments(p_h) 
-          ρ = self._estimate_ρ_uvar(_mode, _kurt / _var.square().clamp_min(self.ε), p_h)
+          ρ = self._estimate_ρ_uvar(_mode, _kurt / _var.square().clamp_min(ε), p_h)
       
         if conf_gating:
           # ρ gated update 
@@ -472,14 +511,18 @@ class JAGeRLoss(nn.Module):
       # λ update
       Ent_p_h = self._ce(p_h, log_p_h)
       if mixture:
-        Kπminus1_pred_mode: torch.Tensor = self.Kπminus1[tuple(_mode.T) if joint else _mode]
-        log_S = (ρ.unsqueeze(-1)*Kπminus1_pred_mode).log1p() # logK is subtracted as per need
+        if joint:
+          Kπ_pred_mode: torch.Tensor = self.Kπ[*_mode.T]
+          log_S = torch.lerp(torch.ones_like(Kπ_pred_mode), Kπ_pred_mode, ρ.unsqueeze(-1)).log()
+        else:
+          Kπminus1_pred_mode: torch.Tensor = self.Kπminus1[_mode]
+          log_S = (ρ.unsqueeze(-1)*Kπminus1_pred_mode).log1p() # logK is subtracted as per need
         _cond: torch.Tensor = _mode < K-_mode  # type: ignore[assignment]
         min_idx = torch.where(_cond, K-1, 0)
         if joint:
           log_S_min = log_S.gather(-1, (min_idx-_mode).square().sum(-1, keepdim=True)).squeeze_(-1)
           log_S_at_mode = log_S[:,0]
-          kl_div = -Ent_p_h.sum(-1) - (p_shell*log_S).sum(-1) + HlogK
+          kl_div = -Ent_p_h.sum(-1) + self._ce(p_shell, log_S) + HlogK
           u_bound = -(
             Ent_p_h.sum(-1) +
             log_S_min - HlogK +
@@ -489,7 +532,7 @@ class JAGeRLoss(nn.Module):
         else:
           log_S_min = log_S.take_along_dim(min_idx.unsqueeze_(-1), 2).squeeze_(-1)
           log_S_at_mode = log_S.take_along_dim(_mode_unsq, 2).squeeze_(-1)
-          kl_div = (p_h * (log_p_h - log_S)).sum(-1) + logK
+          kl_div = -self._ce(p_h, log_p_h - log_S) + logK
           u_bound = -(
             Ent_p_h +
             log_S_min - logK +
@@ -506,7 +549,7 @@ class JAGeRLoss(nn.Module):
             print(f"kl_div: {kl_div}")
             print(f"u_bound: {u_bound}")
             raise ValueError("Negative or NaN kl_div or u_bound encountered. See debug info for details.")
-          if self._debug and kl_div.gt(u_bound+self.ε).any():
+          if self._debug and kl_div.gt(u_bound+ε).any():
             torch.set_printoptions(precision=15, sci_mode=False)
             print("Debug Info:")
             print(f"log_p_h: {log_p_h}")
@@ -526,12 +569,12 @@ class JAGeRLoss(nn.Module):
 
 
       λt = λ0 * (1 - kl_div / (α * u_bound))
-      if self._debug and ((λt + self.ε < λ0*(1 - 1/α)).any() or λt.isnan().any()):
+      if self._debug and ((λt + ε < λ0*(1 - 1/α)).any() or λt.isnan().any()):
         torch.set_printoptions(precision=15, sci_mode=False)
         print("Debug Info:")
         print(f"kl_div: {kl_div}")
         print(f"u_bound: {u_bound}")
-        print(f"λt: {λt + self.ε}")
+        print(f"λt: {λt + ε}")
         print(f"Expected λt range: [{λ0*(1 - 1/α)}, {λ0}]")
         raise ValueError("λt out of expected range or NaN. See debug info for details.")
       λ_reg_loss = -.5*α*u_bound * (λt - λ0).square() / λ0
@@ -543,55 +586,68 @@ class JAGeRLoss(nn.Module):
       # competitor assignment
       if mixture:
         if reassignment:
-          Kπminus1_label: torch.Tensor = self.Kπminus1[tuple(Y.T) if joint else Y]
+          if joint:
+            Kπ_label: torch.Tensor = self.Kπ[*Y.T]
+          else:
+            Kπminus1_label: torch.Tensor = self.Kπminus1[Y]
         if joint:
           r_mode = self._outer_sum(self.D[_mode].to(torch.long))
           if reassignment:
             r_label = self._outer_sum(self.D[Y].to(torch.long))
-            Kπminus1_label: torch.Tensor = Kπminus1_label.gather(1, r_label)
-            Kπminus1_pred_mode: torch.Tensor = Kπminus1_pred_mode.gather(1, r_mode)
+            Kπ_label = Kπ_label.gather(1, r_label)
+            Kπ_pred_mode = Kπ_pred_mode.gather(1, r_mode)
         if reassignment:
-          log_υ = (ρ.unsqueeze(-1) * (Kπminus1_label + ρ.unsqueeze(-1) * (Kπminus1_pred_mode - Kπminus1_label))).log1p() # type: ignore[reportOperatorIssue]
+          if joint:
+            υ = torch.lerp(Kπ_label, Kπ_pred_mode, ρ.unsqueeze(-1))
+            log_υ = torch.lerp(torch.ones_like(υ), υ, ρ.unsqueeze(-1)).log()
+          else:
+            log_υ = (ρ.unsqueeze(-1) * (Kπminus1_label + ρ.unsqueeze(-1) * (Kπminus1_pred_mode - Kπminus1_label))).log1p() # type: ignore[reportOperatorIssue]
         else:
           if joint:
             log_S = log_S.gather(1, r_mode)
           log_υ = log_S
       
-      thresholds = self._base_thresholds.unsqueeze(0).expand(B, *self._base_thresholds.shape)
       if joint:
-        _1hot_label = torch.zeros_like(thresholds, dtype=thresholds.dtype)
-        batch_idx = torch.arange(B, device=y_pred.device)
-        _1hot_label[batch_idx, *Y.T] = 1.
+        thresholds = self._base_thresholds.reshape(1, -1).expand(B, -1)
+        flat_idx_label = (Y * self.flat_factors).sum(1, keepdim=True)
         if reassignment:
-          _1hot_pred_max = torch.zeros_like(thresholds, dtype=thresholds.dtype)
-          _1hot_pred_max[batch_idx, *_mode.T] = 1.
-          _1hot_pred_max = _1hot_pred_max.view(B, -1)
-        thresholds = thresholds.view(B, -1)
-        _1hot_label = _1hot_label.view(B, -1)
+          flat_idx_mode = (_mode * self.flat_factors).sum(1, keepdim=True)
       else:
+        thresholds = self._base_thresholds.unsqueeze(0).expand(B, *self._base_thresholds.shape)
         _1hot_label = F.one_hot(Y, K).to(thresholds.dtype)
         if reassignment:
           _1hot_pred_max = F.one_hot(_mode, K).to(thresholds.dtype)
       
-      payload = thresholds + λt_unsq * log_υ if mixture else thresholds
-      mass = torch.lerp(_1hot_label, _1hot_pred_max, ρ_sq[..., None]) if reassignment else _1hot_label
-      c = thresholds - payload * mass
+      if not joint:
+        payload = thresholds + λt_unsq * log_υ if mixture else thresholds
+        mass = torch.lerp(_1hot_label, _1hot_pred_max, ρ_sq[..., None]) if reassignment else _1hot_label
+        c = thresholds - payload * mass
     
     if joint:
-      y_pred = self._outer_sum(y_pred, flat=False)
-      y_label = y_pred[batch_idx, *Y.T].unsqueeze(-1)
+      y_pred = self._outer_sum(y_pred, flat=True)
+      y_label = y_pred.gather(1, flat_idx_label)
       if reassignment:
-        y_pred_max = y_pred[batch_idx, *_mode.T].unsqueeze(-1)
-      y_pred = y_pred.flatten(1)
+        ρ_sq_unsq: torch.Tensor = ρ_sq.unsqueeze(-1)
+        y_pred_max = y_pred.gather(1, flat_idx_mode)
+        ref = torch.lerp(y_label, y_pred_max, ρ_sq_unsq)
+      else:
+        ref = y_label
+      diff_logits = y_pred - ref + thresholds
+      payload = thresholds + λt_unsq * log_υ if mixture else thresholds
+      if reassignment:
+        diff_logits = diff_logits.clone()
+        diff_logits.scatter_add_(1, flat_idx_label, -(1 - ρ_sq_unsq) * payload.gather(1, flat_idx_label))
+        diff_logits.scatter_add_(1, flat_idx_mode, -ρ_sq_unsq * payload.gather(1, flat_idx_mode)) # type: ignore[arg-type]
+      else:
+        diff_logits = diff_logits.clone()
+        diff_logits.scatter_add_(1, flat_idx_label, -payload.gather(1, flat_idx_label))
     else:
       y_label = y_pred.gather(2, Y.unsqueeze(-1))
       if reassignment:
         y_pred_max = y_pred.gather(2, _mode_unsq)
-
-    ref = torch.lerp(y_label, y_pred_max, ρ_sq[..., None]) if reassignment else y_label
-    y_pred = y_pred - ref
-
-    diff_logits = y_pred + c 
+      ref = torch.lerp(y_label, y_pred_max, ρ_sq[..., None]) if reassignment else y_label
+      y_pred = y_pred - ref
+      diff_logits = y_pred + c 
     diff_logits_lam_fix = diff_logits / λt_unsq
     if mixture:
       diff_logits_lam_fix = diff_logits_lam_fix + log_υ

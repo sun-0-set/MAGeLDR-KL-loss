@@ -1,16 +1,16 @@
 #!/bin/bash -l
 #SBATCH -p a100 
-#SBATCH --job-name=jager_dress_cv_k6_40ep_ce
+#SBATCH --job-name=jager_dress_cv_k6_40ep
 ## SBATCH --job-name=jager_dress_cv_k6_jager0100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=96G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:30:00
 #SBATCH --array=0-5
-#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep_ce.out
-#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep_ce.err
+#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep.out
+#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep.err
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au  	# Email to which notifications will be sent
 
@@ -74,15 +74,13 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 JOBS=(
   "ce"
   "ce --ce_label_smoothing 0.1"
-  # "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
   # "jager --no-joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  # "jager --joint --mixture --no-conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "jager --joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
   # "jager --joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
 )
 

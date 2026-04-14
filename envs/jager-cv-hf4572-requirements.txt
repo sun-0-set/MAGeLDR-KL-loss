@@ -1,0 +1,20 @@
+# Conservative fallback stack validated on 2026-03-31.
+# Recreate with:
+#   conda create -y -n jager-cv-hf4572 python=3.13 pip
+#   conda activate jager-cv-hf4572
+#   pip install --extra-index-url https://download.pytorch.org/whl/cu118 -r envs/jager-cv-hf4572-requirements.txt
+
+torch==2.7.1+cu118
+transformers==4.57.2
+tokenizers==0.22.2
+huggingface_hub==0.36.2
+safetensors==0.7.0
+sentencepiece==0.2.1
+
+pandas==3.0.1
+numpy==2.4.4
+scikit-learn==1.8.0
+iterative-stratification==0.1.9
+scipy==1.17.1
+tqdm==4.67.3
+wandb==0.25.1
