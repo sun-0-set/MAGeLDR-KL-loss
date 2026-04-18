@@ -1,18 +1,18 @@
 #!/bin/bash -l
 #SBATCH -p a100 
-#SBATCH --job-name=jager_dress_cv_k6_40ep
+#SBATCH --job-name=jager_dress_cv_k6_7-14ep_ce_sweep
 ## SBATCH --job-name=jager_dress_cv_k6_jager0100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=96G
-#SBATCH --time=02:30:00
+#SBATCH --mem=160G
+#SBATCH --time=00:40:00
 #SBATCH --array=0-5
-#SBATCH --output=../slurm_logs/jager_dress_cv_k6_40ep.out
-#SBATCH --error=../slurm_logs/jager_dress_cv_k6_40ep.err
+#SBATCH --output=../slurm_logs/job-name=jager_dress_cv_k6_7-14ep_ce_sweep.out
+#SBATCH --error=../slurm_logs/job-name=jager_dress_cv_k6_7-14ep_ce_sweep.err
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au  	# Email to which notifications will be sent
+#SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au
 
 # ---- Environment (conda) ---------------------------------------------------
 
@@ -56,15 +56,22 @@ DATA_PATH="$SCRIPT_DIR/../data/DREsS/DREsS_New_cleaned.tsv"
 
 MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
-EPOCHS=40
+EPOCHS="${EPOCHS:-16}"
+SCHED_EPOCHS="${SCHED_EPOCHS:-40}"
+ENS_EPOCH_START="${ENS_EPOCH_START:-8}"
+ENS_EPOCH_END="${ENS_EPOCH_END:-14}"
 BATCH=8
 ACCUM=2
 MAXLEN=808
 JAGER_DEBUG=1 
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
-        --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
-        --num_workers 4 --prefetch_factor 4)
+        --epochs "$EPOCHS" --sched_epochs "$SCHED_EPOCHS"
+        --batch_size "$BATCH" --grad_accum "$ACCUM"
+        --num_workers 4 --prefetch_factor 4
+        --ens_mode fixed_range
+        --ens_epoch_start "$ENS_EPOCH_START" --ens_epoch_end "$ENS_EPOCH_END"
+        --ens_stride 1)
 
 export OMP_NUM_THREADS=1
 export JAGeR_DEBUG="$JAGER_DEBUG"
@@ -73,15 +80,26 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 
 JOBS=(
   "ce"
-  "ce --ce_label_smoothing 0.1"
-  "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  "jager --no-joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  "jager --joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-  "jager --joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+  "ce --ce_label_smoothing 0.05"
+  "ce --ce_label_smoothing 0.03"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 5e-2"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 2e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 5e-2"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 1e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 2e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 5e-2"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 1e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 2e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 5e-2"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 1e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 2e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 5e-2"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 1e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 2e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 5e-2"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 1e-1"
+  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 2e-1"
 )
 
 # ---- Fold selection (one fold per array task) -------------------------------
@@ -117,6 +135,7 @@ RESULTS_ROOT="$SCRIPT_DIR/../results/${splits_name}/${SLURM_ARRAY_JOB_ID}"
 mkdir -p "$RESULTS_ROOT"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
 echo "[check] tokenizer.json present at $MODEL/tokenizer.json"
+echo "[info] EPOCHS=$EPOCHS SCHED_EPOCHS=$SCHED_EPOCHS OOF=E${ENS_EPOCH_START}-${ENS_EPOCH_END}"
 
 MASTER_PORT=$((29500 + FOLD))
 FAIL_COUNT=0

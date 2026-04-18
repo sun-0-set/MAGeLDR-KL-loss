@@ -4,7 +4,7 @@ set -euo pipefail
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Usage:
-  ./dress_cv_k6_vast.sh <fold> [run_id]
+  ./dress_cv_k6_vast.sh <fold|all> [run_id]
 
 Environment overrides:
   NPROC_PER_NODE   Number of GPUs for torchrun (default: 4)
@@ -14,7 +14,10 @@ Environment overrides:
   DATA_PATH        Dataset path (default: ../data/DREsS/DREsS_New_cleaned.tsv)
   MODEL            Local model directory (default: ../models/deberta-v3-large)
   TOKEN_CACHE_DIR  Reusable token cache dir (default: alongside data file)
-  EPOCHS           Training epochs (default: 40)
+  EPOCHS           Actual training epochs (default: 16)
+  SCHED_EPOCHS     Scheduler horizon in epochs (default: 40)
+  ENS_EPOCH_START  First epoch in fixed OOF ensemble (default: 8)
+  ENS_EPOCH_END    Last epoch in fixed OOF ensemble (default: 14)
   BATCH            Per-device batch size (default: 16 for 4x H100 SXM)
   ACCUM            Gradient accumulation steps (default: 1)
   MAXLEN           Max sequence length (default: 808)
@@ -23,7 +26,7 @@ Environment overrides:
   HF_OFFLINE       1 to force local HF assets only (default: 1)
   SAVE_MODEL       1 to save best.pt checkpoints (default: 0)
   GRAD_CKPT        1 to enable --grad_ckpt if memory is tight (default: 0)
-  JOB_SET          full (default) or ce_only
+  JOB_SET          full (default), ce_only, or ce_sweep
   RESUME           1 to skip jobs with .exit_code == 0 (default: 1)
   WANDB_ENABLED    1 to enable W&B logging (default: 0)
   WANDB_PROJECT    W&B project name (default: jager)
@@ -36,6 +39,7 @@ Environment overrides:
 
 Examples:
   ./dress_cv_k6_vast.sh 0 vast_20260410
+  JOB_SET=ce_only BATCH=8 ACCUM=2 ./dress_cv_k6_vast.sh all vast_ce_20260418
   NPROC_PER_NODE=4 SAVE_MODEL=1 ./dress_cv_k6_vast.sh 3
 EOF
   exit 0
@@ -48,7 +52,7 @@ FOLD="${FOLD:-${1:-}}"
 RUN_ID="${RUN_ID:-${2:-}}"
 
 if [[ -z "${FOLD}" ]]; then
-  echo "ERROR: fold is required. Run ./dress_cv_k6_vast.sh <fold> [run_id]"
+  echo "ERROR: fold is required. Run ./dress_cv_k6_vast.sh <fold|all> [run_id]"
   exit 1
 fi
 
@@ -65,7 +69,10 @@ TOKEN_CACHE_DIR="${TOKEN_CACHE_DIR:-}"
 RESULTS_BASE="${RESULTS_BASE:-$SCRIPT_DIR/../results}"
 RESULTS_ROOT="${RESULTS_ROOT:-$RESULTS_BASE/$(basename "$SPLITS_DIR")/$RUN_ID}"
 
-EPOCHS="${EPOCHS:-40}"
+EPOCHS="${EPOCHS:-16}"
+SCHED_EPOCHS="${SCHED_EPOCHS:-40}"
+ENS_EPOCH_START="${ENS_EPOCH_START:-8}"
+ENS_EPOCH_END="${ENS_EPOCH_END:-14}"
 BATCH="${BATCH:-16}"
 ACCUM="${ACCUM:-1}"
 MAXLEN="${MAXLEN:-808}"
@@ -92,10 +99,15 @@ COMMON=(
   --model_name "$MODEL"
   --max_length "$MAXLEN"
   --epochs "$EPOCHS"
+  --sched_epochs "$SCHED_EPOCHS"
   --batch_size "$BATCH"
   --grad_accum "$ACCUM"
   --num_workers "$NUM_WORKERS"
   --prefetch_factor "$PREFETCH_FACTOR"
+  --ens_mode fixed_range
+  --ens_epoch_start "$ENS_EPOCH_START"
+  --ens_epoch_end "$ENS_EPOCH_END"
+  --ens_stride 1
 )
 
 if [[ -n "$TOKEN_CACHE_DIR" ]]; then
@@ -139,45 +151,61 @@ export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$RESULTS_ROOT/.wandb_cache}"
 mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR"
 
 case "$JOB_SET" in
-  ce_only)
+  ce_only|ce_sweep)
     JOBS=(
       "ce"
-      "ce --ce_label_smoothing 0.1"
+      "ce --ce_label_smoothing 0.05"
+      "ce --ce_label_smoothing 0.03"
     )
     ;;
   full)
     JOBS=(
-      "ce"
-      "ce --ce_label_smoothing 0.1"
-      "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-      "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-      "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-      "jager --no-joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-      "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-      "jager --joint --mixture --conf_gating --no-reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
-      "jager --joint --mixture --conf_gating --reassignment --lambda0 1 --lambda_min .5 --C 1e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 5e-2"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 2e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 5e-2"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 1e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 2e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 5e-2"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 1e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 2e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 5e-2"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 1e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 2e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 5e-2"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 1e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 2e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 5e-2"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 1e-1"
+      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 2e-1"
     )
     ;;
   *)
-    echo "ERROR: JOB_SET must be 'full' or 'ce_only', got: $JOB_SET"
+    echo "ERROR: JOB_SET must be 'full', 'ce_only', or 'ce_sweep', got: $JOB_SET"
     exit 1
     ;;
 esac
 
-if ! [[ "$FOLD" =~ ^[0-9]+$ ]]; then
-  echo "ERROR: fold must be an integer, got: $FOLD"
-  exit 1
-fi
-
-if (( FOLD < 0 || FOLD >= K )); then
-  echo "ERROR: FOLD=$FOLD is outside [0, $((K - 1))]"
+FOLDS=()
+if [[ "$FOLD" == "all" ]]; then
+  for ((i = 0; i < K; i++)); do
+    FOLDS+=("$i")
+  done
+elif [[ "$FOLD" =~ ^[0-9]+$ ]]; then
+  if (( FOLD < 0 || FOLD >= K )); then
+    echo "ERROR: FOLD=$FOLD is outside [0, $((K - 1))]"
+    exit 1
+  fi
+  FOLDS=("$FOLD")
+else
+  echo "ERROR: fold must be an integer or 'all', got: $FOLD"
   exit 1
 fi
 
 echo "[info] PWD=$PWD"
 echo "[info] RUN_ID=$RUN_ID FOLD=$FOLD NPROC_PER_NODE=$NPROC_PER_NODE"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
+echo "[info] EPOCHS=$EPOCHS SCHED_EPOCHS=$SCHED_EPOCHS OOF=E${ENS_EPOCH_START}-${ENS_EPOCH_END}"
 echo "[info] BATCH=$BATCH ACCUM=$ACCUM JOB_SET=$JOB_SET RESUME=$RESUME"
 echo "[info] WANDB_ENABLED=$WANDB_ENABLED WANDB_MODE=$WANDB_MODE WANDB_GROUP=$WANDB_GROUP"
 echo "[info] host=$(hostname)"
@@ -198,66 +226,79 @@ count=$(ls -1 "$SPLITS_DIR"/fold*.json 2>/dev/null | wc -l | tr -d ' ')
 mkdir -p "$RESULTS_ROOT"
 echo "[check] tokenizer.json present at $MODEL/tokenizer.json"
 
-MASTER_PORT=$((MASTER_PORT_BASE + FOLD))
-FAIL_COUNT=0
-FAIL_SUMMARY="$RESULTS_ROOT/fold${FOLD}.failed_jobs.txt"
-rm -f "$FAIL_SUMMARY"
+OVERALL_FAIL_COUNT=0
 
-for job in "${JOBS[@]}"; do
-  read -r LOSS ARGS <<<"$job"
+for FOLD in "${FOLDS[@]}"; do
+  MASTER_PORT=$((MASTER_PORT_BASE + FOLD))
+  FAIL_COUNT=0
+  FAIL_SUMMARY="$RESULTS_ROOT/fold${FOLD}.failed_jobs.txt"
+  rm -f "$FAIL_SUMMARY"
 
-  if [[ -n "${ARGS:-}" ]]; then
-    TAG="${LOSS}-$(echo "$ARGS" | tr ' ' '-' | tr -s '-')"
-  else
-    TAG="${LOSS}"
-  fi
+  echo "[info] running fold ${FOLD} on host $(hostname)"
 
-  SAVE="${RESULTS_ROOT}/${TAG}/fold${FOLD}"
-  mkdir -p "$SAVE"
-  LOG="$SAVE/train.log"
-  EXIT_CODE_FILE="$SAVE/.exit_code"
+  for job in "${JOBS[@]}"; do
+    read -r LOSS ARGS <<<"$job"
 
-  if [[ "$RESUME" == "1" && -f "$EXIT_CODE_FILE" ]]; then
-    prev_code="$(tr -d '[:space:]' < "$EXIT_CODE_FILE")"
-    if [[ "$prev_code" == "0" ]]; then
-      echo ">> [fold ${FOLD}] ${TAG} already completed successfully; skipping"
-      continue
+    if [[ -n "${ARGS:-}" ]]; then
+      TAG="${LOSS}-$(echo "$ARGS" | tr ' ' '-' | tr -s '-')"
+    else
+      TAG="${LOSS}"
     fi
+
+    SAVE="${RESULTS_ROOT}/${TAG}/fold${FOLD}"
+    mkdir -p "$SAVE"
+    LOG="$SAVE/train.log"
+    EXIT_CODE_FILE="$SAVE/.exit_code"
+
+    if [[ "$RESUME" == "1" && -f "$EXIT_CODE_FILE" ]]; then
+      prev_code="$(tr -d '[:space:]' < "$EXIT_CODE_FILE")"
+      if [[ "$prev_code" == "0" ]]; then
+        echo ">> [fold ${FOLD}] ${TAG} already completed successfully; skipping"
+        continue
+      fi
+    fi
+
+    echo ">> [fold ${FOLD}] ${TAG} -> $LOG"
+
+    set +e
+    ARGS_ARR=()
+    if [[ -n "${ARGS:-}" ]]; then
+      read -r -a ARGS_ARR <<<"$ARGS"
+    fi
+
+    torchrun \
+      --nproc_per_node="$NPROC_PER_NODE" \
+      --master_port="$MASTER_PORT" \
+      "$SCRIPT_DIR/train.py" "${COMMON[@]}" \
+        --wandb_run_name "${RUN_ID}-fold${FOLD}-${TAG}" \
+        "${EXTRA_ARGS_ARR[@]}" \
+        --loss "$LOSS" "${ARGS_ARR[@]}" \
+        --split_file "${SPLITS_DIR}/fold${FOLD}.json" \
+        --save_dir "$SAVE" \
+        >"$LOG" 2>&1
+
+    code=$?
+    echo "$code" > "$EXIT_CODE_FILE"
+
+    if [[ "$code" != 0 ]]; then
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      OVERALL_FAIL_COUNT=$((OVERALL_FAIL_COUNT + 1))
+      printf '%s\t%s\t%s\n' "$TAG" "$code" "$LOG" >> "$FAIL_SUMMARY"
+      echo "!! [fold ${FOLD}] ${TAG} FAILED (code $code). See $LOG"
+    fi
+    set -e
+  done
+
+  if (( FAIL_COUNT > 0 )); then
+    echo "[summary] Fold ${FOLD} finished with ${FAIL_COUNT} failed run(s). See $FAIL_SUMMARY"
+  else
+    echo "[done] Fold ${FOLD} finished. Results in: $RESULTS_ROOT"
   fi
-
-  echo ">> [fold ${FOLD}] ${TAG} -> $LOG"
-
-  set +e
-  ARGS_ARR=()
-  if [[ -n "${ARGS:-}" ]]; then
-    read -r -a ARGS_ARR <<<"$ARGS"
-  fi
-
-  torchrun \
-    --nproc_per_node="$NPROC_PER_NODE" \
-    --master_port="$MASTER_PORT" \
-    "$SCRIPT_DIR/train.py" "${COMMON[@]}" \
-      --wandb_run_name "${RUN_ID}-fold${FOLD}-${TAG}" \
-      "${EXTRA_ARGS_ARR[@]}" \
-      --loss "$LOSS" "${ARGS_ARR[@]}" \
-      --split_file "${SPLITS_DIR}/fold${FOLD}.json" \
-      --save_dir "$SAVE" \
-      >"$LOG" 2>&1
-
-  code=$?
-  echo "$code" > "$EXIT_CODE_FILE"
-
-  if [[ "$code" != 0 ]]; then
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-    printf '%s\t%s\t%s\n' "$TAG" "$code" "$LOG" >> "$FAIL_SUMMARY"
-    echo "!! [fold ${FOLD}] ${TAG} FAILED (code $code). See $LOG"
-  fi
-  set -e
 done
 
-if (( FAIL_COUNT > 0 )); then
-  echo "[summary] Fold ${FOLD} finished with ${FAIL_COUNT} failed run(s). See $FAIL_SUMMARY"
+if (( OVERALL_FAIL_COUNT > 0 )); then
+  echo "[summary] Sweep finished with ${OVERALL_FAIL_COUNT} failed run(s). Results in: $RESULTS_ROOT"
   exit 1
 fi
 
-echo "[done] Fold ${FOLD} finished. Results in: $RESULTS_ROOT"
+echo "[done] Sweep finished successfully. Results in: $RESULTS_ROOT"

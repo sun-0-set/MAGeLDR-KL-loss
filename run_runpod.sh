@@ -55,33 +55,45 @@ DATA_PATH="$SCRIPT_DIR/../data/DREsS/DREsS_New_cleaned.tsv"
 
 MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
-EPOCHS=40
-T=10
+EPOCHS="${EPOCHS:-16}"
+SCHED_EPOCHS="${SCHED_EPOCHS:-40}"
+ENS_EPOCH_START="${ENS_EPOCH_START:-8}"
+ENS_EPOCH_END="${ENS_EPOCH_END:-14}"
 BATCH=8
 ACCUM=2
 MAXLEN=808
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
-        --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
+        --epochs "$EPOCHS" --sched_epochs "$SCHED_EPOCHS"
+        --batch_size "$BATCH" --grad_accum "$ACCUM"
         --num_workers 4 --prefetch_factor 4
-        --ens_t "$T" --ens_stride 1)
+        --ens_mode fixed_range
+        --ens_epoch_start "$ENS_EPOCH_START" --ens_epoch_end "$ENS_EPOCH_END"
+        --ens_stride 1)
 
 export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_SHOW_CPP_STACKTRACES=1
 
 JOBS=(
-  # "ce"
-  # "ce --ce_label_smoothing 0.1"
-  # "jager --no-joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
-  # "jager --joint --no-mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
-  "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
-  # "jager --no-joint --mixture --conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
-  # reassignment now requires conf_gating
-  # "jager --no-joint --mixture --conf_gating --reassignment --lambda0 3 --alpha 1.25"
-  # "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
-  # "jager --joint --mixture --conf_gating --no-reassignment --lambda0 3 --alpha 1.25"
-  # "jager --joint --mixture --conf_gating --reassignment --lambda0 3 --alpha 1.25"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 5e-2"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 2e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 5e-2"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 2e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 5e-2"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 2e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 5e-2"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 2e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 5e-2"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 2e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 5e-2"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 1e-1"
+  "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 2e-1"
 )
 
 # ---- Fold selection ---------------------------------------------------------
@@ -110,6 +122,7 @@ RUN_ID="$(date +%Y%m%d_%H%M%S)"
 RESULTS_ROOT="$SCRIPT_DIR/../results/${splits_name}/${RUN_ID}"
 mkdir -p "$RESULTS_ROOT"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
+echo "[info] EPOCHS=$EPOCHS SCHED_EPOCHS=$SCHED_EPOCHS OOF=E${ENS_EPOCH_START}-${ENS_EPOCH_END}"
 
 # ---- Run folds --------------------------------------------------------------
 

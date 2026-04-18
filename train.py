@@ -261,8 +261,36 @@ def parse_args():
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save_dir", default="checkpoints")
-    p.add_argument("--ens_t", type=int, default=10)
-    p.add_argument("--ens_stride", type=int, default=1)
+    p.add_argument(
+        "--ens_mode",
+        choices=["fixed_range", "tail"],
+        default="fixed_range",
+        help="How to choose validation epochs for OOF ensembling.",
+    )
+    p.add_argument(
+        "--ens_epoch_start",
+        type=int,
+        default=8,
+        help="First epoch to include when --ens_mode fixed_range.",
+    )
+    p.add_argument(
+        "--ens_epoch_end",
+        type=int,
+        default=14,
+        help="Last epoch to include when --ens_mode fixed_range.",
+    )
+    p.add_argument(
+        "--ens_t",
+        type=int,
+        default=10,
+        help="Number of trailing epochs to ensemble when --ens_mode tail.",
+    )
+    p.add_argument(
+        "--ens_stride",
+        type=int,
+        default=1,
+        help="Stride applied after selecting OOF ensemble epochs.",
+    )
     p.add_argument("--val_frac", type=float, default=0.1,
                    help="If no --split_file, fraction used for validation.")
     p.add_argument("--limit_train", type=int, default=0, help="use only N training examples (0=all)")
@@ -296,6 +324,12 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=2)         # per-device
     p.add_argument("--grad_accum", type=int, default=8)
     p.add_argument("--epochs", type=int, default=2)
+    p.add_argument(
+        "--sched_epochs",
+        type=int,
+        default=None,
+        help="Scheduler horizon in epochs. Defaults to --epochs; set larger to stop early without compressing the LR schedule.",
+    )
     p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
@@ -340,7 +374,17 @@ def parse_args():
     p.add_argument("--wandb_run_id", type=str, default=None, help="Optional explicit W&B run id for resume")
     p.add_argument("--wandb_tags", type=str, default=None, help="Comma-separated extra W&B tags")
 
-    return p.parse_args()
+    args = p.parse_args()
+    if args.sched_epochs is None:
+        args.sched_epochs = args.epochs
+    if args.sched_epochs < args.epochs:
+        p.error("--sched_epochs must be greater than or equal to --epochs.")
+    if args.ens_mode == "fixed_range":
+        if args.ens_epoch_end < args.ens_epoch_start:
+            p.error("--ens_epoch_end must be greater than or equal to --ens_epoch_start.")
+        if args.epochs < args.ens_epoch_end:
+            p.error("--epochs must be greater than or equal to --ens_epoch_end when --ens_mode fixed_range.")
+    return args
 
 
 def evaluate(model, dl, loss_fn, device, args=None, return_payload: bool = False):
@@ -987,10 +1031,15 @@ def main():
 
         optim = torch.optim.AdamW(model.parameters(), fused=(device.type == "cuda"), lr=args.lr, weight_decay=args.weight_decay)
 
-        # scheduler: 10% warmup
-        total_steps = math.ceil(len(dl_train) / args.grad_accum) * args.epochs
+        # scheduler: 10% warmup over the chosen scheduler horizon
+        total_steps = math.ceil(len(dl_train) / args.grad_accum) * args.sched_epochs
         warmup = max(1, int(0.1 * total_steps))
         sched = get_linear_schedule_with_warmup(optim, warmup, total_steps)
+        if is_main_process():
+            print(
+                f"[sched] epochs={args.epochs} sched_epochs={args.sched_epochs} "
+                f"total_steps={total_steps} warmup_steps={warmup}"
+            )
 
         use_amp   = (device.type == "cuda")
         amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
@@ -1297,7 +1346,8 @@ def main():
                                 "lambda0", "alpha", "C",
                                 "ce_label_smoothing", "seed",
                                 "model_name", "max_length", "batch_size",
-                                "grad_accum", "epochs"
+                                "grad_accum", "epochs", "sched_epochs",
+                                "ens_mode", "ens_epoch_start", "ens_epoch_end", "ens_t", "ens_stride",
                             ]
                         }
                     }
@@ -1310,11 +1360,41 @@ def main():
             if is_dist(): 
                 dist.barrier()
 
-        # ---------- Last-T-epoch probability ensembling on VAL (OOF for this fold) ----------
+        # ---------- Probability ensembling on VAL (OOF for this fold) ----------
         if is_main_process() and len(val_pred_epochs) > 0:
-            T = max(1, int(getattr(args, "ens_t", 10)))
+            ens_mode = str(getattr(args, "ens_mode", "fixed_range"))
             S = max(1, int(getattr(args, "ens_stride", 1)))
-            keep = [rec for rec in val_pred_epochs[-T:]][::S]
+            if ens_mode == "fixed_range":
+                ens_epoch_start = max(1, int(getattr(args, "ens_epoch_start", 8)))
+                ens_epoch_end = int(getattr(args, "ens_epoch_end", 14))
+                if ens_epoch_end < ens_epoch_start:
+                    raise ValueError(
+                        f"Invalid fixed OOF range: start={ens_epoch_start}, end={ens_epoch_end}"
+                    )
+                keep = [
+                    rec
+                    for rec in val_pred_epochs
+                    if ens_epoch_start <= int(rec["epoch"]) <= ens_epoch_end
+                ]
+                selected_epoch_set = [int(rec["epoch"]) for rec in keep]
+                expected_epoch_set = list(range(ens_epoch_start, ens_epoch_end + 1))
+                if selected_epoch_set != expected_epoch_set:
+                    seen_epochs = [int(rec["epoch"]) for rec in val_pred_epochs]
+                    raise RuntimeError(
+                        "Fixed OOF range requires the full contiguous epoch set "
+                        f"{expected_epoch_set}, but found {selected_epoch_set}. Seen epochs={seen_epochs}"
+                    )
+                keep = keep[::S]
+                window_tag = f"E{ens_epoch_start}-{ens_epoch_end}"
+            elif ens_mode == "tail":
+                T = max(1, int(getattr(args, "ens_t", 10)))
+                keep = [rec for rec in val_pred_epochs[-T:]][::S]
+                window_tag = f"T{T}"
+            else:
+                raise ValueError(f"Unsupported ens_mode={ens_mode!r}")
+
+            selected_epochs = [int(rec["epoch"]) for rec in keep]
+            print(f"[oof] ensembling val predictions from epochs={selected_epochs} mode={ens_mode}")
             base_ids = keep[0]["ids"]
             for rec in keep[1:]:
                 if not np.array_equal(base_ids, rec["ids"]):
@@ -1344,7 +1424,7 @@ def main():
                         row[f"{h}_p{int(c)}"] = float(p[j])
                 rows.append(row)
             os.makedirs(args.save_dir, exist_ok=True)
-            oof_path = os.path.join(args.save_dir, f"oof_val_T{T}.csv")
+            oof_path = os.path.join(args.save_dir, f"oof_val_{window_tag}.csv")
             with open(oof_path, "w", newline="") as f:
                 fieldnames = list(rows[0].keys()) if rows else ["id"]
                 w = csv.DictWriter(f, fieldnames=fieldnames); w.writeheader()

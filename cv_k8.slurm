@@ -56,16 +56,21 @@ DATA_PATH="$SCRIPT_DIR/../data/English-Language-Learners-Evaluation/ELA_Dataset_
 
 MODEL="$SCRIPT_DIR/../models/deberta-v3-large"
 
-EPOCHS=40
-T=10
+EPOCHS="${EPOCHS:-16}"
+SCHED_EPOCHS="${SCHED_EPOCHS:-40}"
+ENS_EPOCH_START="${ENS_EPOCH_START:-8}"
+ENS_EPOCH_END="${ENS_EPOCH_END:-14}"
 BATCH=4
 ACCUM=8
 MAXLEN=1024
 
 COMMON=(--data_path "$DATA_PATH" --model_name "$MODEL" --max_length "$MAXLEN"
-        --epochs "$EPOCHS" --batch_size "$BATCH" --grad_accum "$ACCUM"
+        --epochs "$EPOCHS" --sched_epochs "$SCHED_EPOCHS"
+        --batch_size "$BATCH" --grad_accum "$ACCUM"
         --num_workers 4 --prefetch_factor 4
-        --ens_t "$T" --ens_stride 1)
+        --ens_mode fixed_range
+        --ens_epoch_start "$ENS_EPOCH_START" --ens_epoch_end "$ENS_EPOCH_END"
+        --ens_stride 1)
 
 export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
@@ -116,6 +121,7 @@ splits_name="$(basename "$SPLITS_DIR")"
 RESULTS_ROOT="$SCRIPT_DIR/results/${splits_name}/${SLURM_ARRAY_JOB_ID}"
 mkdir -p "$RESULTS_ROOT"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
+echo "[info] EPOCHS=$EPOCHS SCHED_EPOCHS=$SCHED_EPOCHS OOF=E${ENS_EPOCH_START}-${ENS_EPOCH_END}"
 
 MASTER_PORT=$((29500 + FOLD))
 
