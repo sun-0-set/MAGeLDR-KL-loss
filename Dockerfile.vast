@@ -1,6 +1,9 @@
-FROM vastai/pytorch:2.6.0-cuda-12.6.3-py312
+FROM vastai/pytorch:cuda-13.0.2-auto
 
 SHELL ["/bin/bash", "-lc"]
+
+ARG TORCH_VERSION=2.11.0
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
@@ -29,8 +32,15 @@ COPY bootstrap_vast_workspace.sh /usr/local/bin/bootstrap_vast_workspace.sh
 RUN python3 -m venv "$VIRTUAL_ENV"
 
 RUN python -m pip install --upgrade pip && \
+    python -m pip install "torch==${TORCH_VERSION}" --index-url "${TORCH_INDEX_URL}" && \
     grep -vE '^\s*(#|$|torch==)' /tmp/requirements-vast.txt > /tmp/requirements-no-torch.txt && \
-    python -m pip install -r /tmp/requirements-no-torch.txt
+    python -m pip install -r /tmp/requirements-no-torch.txt && \
+    python - <<'PY'
+import torch
+print("[info] torch:", torch.__version__)
+print("[info] torch.cuda:", torch.version.cuda)
+print("[info] cuda available:", torch.cuda.is_available())
+PY
 
 RUN chmod +x /usr/local/bin/bootstrap_vast_workspace.sh
 

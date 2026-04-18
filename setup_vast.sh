@@ -17,6 +17,8 @@ WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
 PROJECT_DIR="${PROJECT_DIR:-$WORKSPACE_ROOT/MAGeLDR-KL-loss}"
 ENV_NAME="${ENV_NAME:-jager-cv}"
 CONDA_PREFIX="${CONDA_PREFIX:-$WORKSPACE_ROOT/miniconda3}"
+TORCH_VERSION="${TORCH_VERSION:-2.11.0}"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 
 echo "=== [1/4] Making conda available ==="
 if ! command -v conda >/dev/null 2>&1; then
@@ -53,8 +55,20 @@ conda activate "$ENV_NAME"
 echo "=== [3/4] Refreshing pip ==="
 pip install --upgrade pip
 
-echo "=== [4/4] Installing project dependencies ==="
-pip install -r "$PROJECT_DIR/requirements.txt"
+echo "=== [4/4] Installing PyTorch and project dependencies ==="
+pip install "torch==${TORCH_VERSION}" --index-url "$TORCH_INDEX_URL"
+
+tmp_requirements="$(mktemp)"
+grep -vE '^[[:space:]]*(#|$|torch([[:space:]]|[<>=!~]).*)$' "$PROJECT_DIR/requirements.txt" > "$tmp_requirements"
+pip install -r "$tmp_requirements"
+rm -f "$tmp_requirements"
+
+python - <<'PY'
+import torch
+print("[info] torch:", torch.__version__)
+print("[info] torch.cuda:", torch.version.cuda)
+print("[info] cuda available:", torch.cuda.is_available())
+PY
 
 echo
 echo "============================================="
