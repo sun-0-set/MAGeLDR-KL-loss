@@ -1,18 +1,18 @@
 #!/bin/bash -l
 #SBATCH -p a100 
-#SBATCH --job-name=jager_dress_cv_k6_7-14ep_ce_sweep
-## SBATCH --job-name=jager_dress_cv_k6_jager0100
+#SBATCH --job-name=jager_dress_cv_k6_7-14ep_joint_λ1-3_C1-5e-2
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=160G
-#SBATCH --time=00:40:00
+#SBATCH --time=02:40:00
 #SBATCH --array=0-5
-#SBATCH --output=../slurm_logs/job-name=jager_dress_cv_k6_7-14ep_ce_sweep.out
-#SBATCH --error=../slurm_logs/job-name=jager_dress_cv_k6_7-14ep_ce_sweep.err
+#SBATCH --output=../slurm_logs/job-name=%x_%A_%a.out
+#SBATCH --error=../slurm_logs/job-name=%x_%A_%a.err
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=pavlo.sultanskyi@adelaide.edu.au
+
 
 # ---- Environment (conda) ---------------------------------------------------
 
@@ -78,29 +78,7 @@ export JAGeR_DEBUG="$JAGER_DEBUG"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_SHOW_CPP_STACKTRACES=1
 
-JOBS=(
-  "ce"
-  "ce --ce_label_smoothing 0.05"
-  "ce --ce_label_smoothing 0.03"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 5e-2"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 2e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 5e-2"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 2e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 5e-2"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 2e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 5e-2"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 2e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 5e-2"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 2e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 5e-2"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 1e-1"
-  # "jager --no-joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 2e-1"
-)
+JOBS=()
 
 # ---- Fold selection (one fold per array task) -------------------------------
 
@@ -115,6 +93,14 @@ if (( FOLD < 0 || FOLD >= K )); then
   echo "ERROR: FOLD=$FOLD is outside [0, $((K-1))]"
   exit 1
 fi
+
+for MIXTURE_FLAG in "--no-mixture" "--mixture"; do
+  for LAMBDA0 in 1 2 3; do
+    for C in 1e-2 2e-2 5e-2; do
+      JOBS+=("jager --joint ${MIXTURE_FLAG} --no-conf_gating --no-reassignment --lambda0 ${LAMBDA0} --lambda_min 0.5 --C ${C}")
+    done
+  done
+done
 
 echo "[info] running fold ${FOLD} on host $(hostname)"
 

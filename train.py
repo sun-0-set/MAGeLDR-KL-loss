@@ -339,6 +339,12 @@ def parse_args():
     p.add_argument("--unfreeze_at_epoch", type=int, default=-1, help="-1 = never unfreeze in this run")
     p.add_argument("--log_every", type=int, default=50, help="Log training stats every N optimizer steps")
     p.add_argument("--save_model", action="store_true", help="Save best.pt (OFF by default; turn on for finalist runs).")
+    p.add_argument(
+        "--init_model_from",
+        type=str,
+        default=None,
+        help="Warm-start model weights from a checkpoint file, or from best.pt inside a checkpoint directory.",
+    )
 
     # --- Loss family / hyperparameters --------------------------------
     p.add_argument("--loss", choices=["jager", "ce"], default="jager",
@@ -672,8 +678,6 @@ def main():
     if args.loss == "jager" and not args.mixture:
         args.conf_gating = False
         args.reassignment = False
-    if args.loss == "jager" and args.reassignment and not args.conf_gating:
-        raise ValueError("JAGeR reassignment requires --conf_gating.")
 
     if os.path.sep in args.model_name or args.model_name.startswith("."):
         args.model_name = os.path.abspath(os.path.expanduser(args.model_name))
@@ -875,13 +879,35 @@ def main():
         if added:
             model.resize_token_embeddings(len(tok))  # type: ignore[union-attr]
 
+        def unwrap(m): return m.module if hasattr(m, "module") else m
+
+        def _resolve_checkpoint_path(path: str) -> str:
+            ckpt_path = os.path.abspath(os.path.expanduser(path))
+            if os.path.isdir(ckpt_path):
+                ckpt_path = os.path.join(ckpt_path, "best.pt")
+            if not os.path.exists(ckpt_path):
+                raise FileNotFoundError(f"Missing checkpoint for --init_model_from: {ckpt_path}")
+            return ckpt_path
+
+        if args.init_model_from:
+            init_path = _resolve_checkpoint_path(args.init_model_from)
+            ckpt = torch.load(init_path, map_location="cpu")
+            if not isinstance(ckpt, dict) or "model" not in ckpt:
+                raise KeyError(f"{init_path} does not contain a 'model' state dict.")
+            incompat = unwrap(model).load_state_dict(ckpt["model"], strict=True)  # type: ignore[union-attr]
+            if is_main_process():
+                print(f"[init] loaded model weights from {init_path}")
+                missing = list(getattr(incompat, "missing_keys", []))
+                unexpected = list(getattr(incompat, "unexpected_keys", []))
+                if missing or unexpected:
+                    print(f"[init] load_state_dict mismatch: missing={missing}, unexpected={unexpected}")
+
         if is_main_process():
             enc_dtype = next(model.encoder.parameters()).dtype  # type: ignore[union-attr]
             head_dtype = next(model.heads.parameters()).dtype  # type: ignore[union-attr]
             print(f"[model] encoder_dtype={enc_dtype} heads_dtype={head_dtype}")
 
         # Print gradient checkpointing status
-        def unwrap(m): return m.module if hasattr(m, "module") else m
         if is_main_process():
             base = unwrap(model)
             enc = base.encoder  # type: ignore[union-attr]
@@ -948,11 +974,25 @@ def main():
                 if is_main_process():
                     print(f"[warn] {ckpt_path} has no JAGeR loss_state; eval loss will use reinitialized buffers.")
                 return
+            if isinstance(state, dict) and "Kπ" in state:
+                state = {k: v for k, v in state.items() if k != "Kπ"}
             incompat = loss_obj.load_state_dict(state, strict=False)
             missing = list(getattr(incompat, "missing_keys", []))
             unexpected = list(getattr(incompat, "unexpected_keys", []))
             if (missing or unexpected) and is_main_process():
                 print(f"[warn] JAGeR loss_state mismatch for {ckpt_path}: missing={missing}, unexpected={unexpected}")
+
+        def _metrics_args_payload():
+            run_args = vars(args).copy()
+            keys = [
+                "loss", "joint", "mixture", "conf_gating", "reassignment",
+                "lambda0", "lambda_min", "alpha", "C",
+                "ce_label_smoothing", "seed",
+                "model_name", "init_model_from", "max_length", "batch_size",
+                "grad_accum", "epochs", "sched_epochs",
+                "ens_mode", "ens_epoch_start", "ens_epoch_end", "ens_t", "ens_stride",
+            ]
+            return {k: run_args.get(k) for k in keys}
 
 
         # ---- Static buffer stats (λ, ρ) captured once per run/split ----
@@ -1021,6 +1061,7 @@ def main():
                     }
 
             if is_main_process() and payload is not None:
+                payload["args"] = _metrics_args_payload()
                 payload.setdefault("extra", {})["static_stats"] = static_stats
                 os.makedirs(args.save_dir, exist_ok=True)
                 with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
@@ -1053,17 +1094,43 @@ def main():
         val_pred_epochs = []  # list of {"epoch": int, "ids": np.ndarray, "y": dict, "p": dict}
         last_val_metrics = None
 
-        def _log_train_step(step_loss: float, epoch_num: int):
+        def _scalar_float(x: float | torch.Tensor) -> float:
+            if isinstance(x, torch.Tensor):
+                return float(x.detach().cpu())
+            return float(x)
+
+        def _log_train_step(
+            step_loss: float | torch.Tensor,
+            epoch_num: int,
+            *,
+            step_loss_value: float | None = None,
+            should_log: bool | None = None,
+        ):
             nonlocal global_step
-            if run_wandb is not None:
-                log_dict = {"train/loss_step": float(step_loss), "epoch": epoch_num}
+            if should_log is None:
+                should_log = (global_step % max(1, args.log_every)) == 0
+            if run_wandb is not None and should_log:
+                if step_loss_value is None:
+                    step_loss_value = _scalar_float(step_loss)
+                log_dict = {"train/loss_step": step_loss_value, "epoch": epoch_num}
                 λ = getattr(loss_fn, "λ", None)
                 if isinstance(λ, torch.Tensor):
                     lam_det = λ.detach()
-                    log_dict["train/lambda_min"] = float(lam_det.min().cpu())
-                    log_dict["train/lambda_max"] = float(lam_det.max().cpu())
-                if (global_step % max(1, args.log_every)) == 0:
-                    wandb.log(log_dict, step=global_step)  # type: ignore[union-attr]
+                    lam_min = float(lam_det.min().cpu())
+                    lam_max = float(lam_det.max().cpu())
+                    log_dict["train/lambda_min"] = lam_min
+                    log_dict["train/lambda_max"] = lam_max
+                    log_dict["jager/lambda_min"] = lam_min
+                    log_dict["jager/lambda_max"] = lam_max
+                lam_reg = getattr(loss_fn, "_last_lambda_reg", None)
+                if isinstance(lam_reg, torch.Tensor):
+                    log_dict["jager/lambda_reg"] = float(lam_reg.detach().cpu())
+                elif lam_reg is not None:
+                    log_dict["jager/lambda_reg"] = float(lam_reg)
+                ρ = getattr(loss_fn, "ρ", None)
+                if isinstance(ρ, torch.Tensor):
+                    log_dict["loss/ρ"] = float(ρ.detach().mean().cpu())
+                wandb.log(log_dict, step=global_step)  # type: ignore[union-attr]
             global_step += 1
 
         for epoch in range(1, args.epochs+1):
@@ -1077,8 +1144,8 @@ def main():
                 if is_main_process():
                     print(f">> Unfroze encoder at epoch {epoch}.")
             model.train()
-            running = 0.0
-            window_loss = 0.0
+            running = torch.zeros((), dtype=torch.float64, device=device)
+            window_loss = torch.zeros_like(running)
             num_train_batches = len(dl_train)
             for step, batch in enumerate(dl_train, start=1):
                 ids = batch["ids"].to(device, non_blocking=pin)
@@ -1109,11 +1176,13 @@ def main():
                         scaler.scale(loss).backward()
                     else:
                         loss.backward()
-                    running += loss.item()
-                    window_loss += loss.item()
+                    loss_for_log = loss.detach()
+                    if loss_for_log.dtype != torch.float64:
+                        loss_for_log = loss_for_log.to(torch.float64)
+                    running.add_(loss_for_log)
+                    window_loss.add_(loss_for_log)
 
                 if sync_needed:
-                    print(f"[epoch {epoch}] step {step}/{len(dl_train)}: loss={window_loss:.4f} ")
                     if scaler is not None and scaler.is_enabled():
                         scaler.unscale_(optim)
                     nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1122,19 +1191,34 @@ def main():
                     else:
                         optim.step()
                     optim.zero_grad(set_to_none=True); sched.step()
-                    _log_train_step(window_loss, epoch)
-                    window_loss = 0.0
+                    should_log_step = (global_step % max(1, args.log_every)) == 0 or step == len(dl_train)
+                    window_loss_value = None
+                    if should_log_step and is_main_process():
+                        window_loss_value = _scalar_float(window_loss)
+                        print(f"[epoch {epoch}] step {step}/{len(dl_train)}: loss={window_loss_value:.4f} ")
+                    _log_train_step(
+                        window_loss,
+                        epoch,
+                        step_loss_value=window_loss_value,
+                        should_log=should_log_step,
+                    )
+                    window_loss.zero_()
+
+            train_loss_avg = (
+                _scalar_float(running / max(1, math.ceil(len(dl_train)/args.grad_accum)))
+                if is_main_process()
+                else float("nan")
+            )
 
             # Monitor λ range
-            if hasattr(loss_fn, "λ") and isinstance(getattr(loss_fn, "λ", None), torch.Tensor):
+            if is_main_process() and hasattr(loss_fn, "λ") and isinstance(getattr(loss_fn, "λ", None), torch.Tensor):
                 with torch.no_grad():
                     λ = loss_fn.λ
                     lam_min = λ.min().item(); lam_max = λ.max().item()  # type: ignore[operator]
-                if is_main_process():
-                    lam_reg = getattr(loss_fn, '_last_lambda_reg', None)
-                    lam_reg_str = f" lambda_reg={lam_reg:.6f}" if lam_reg is not None else ""
-                    print(f"[epoch {epoch}] train_loss(avg per step)={running/max(1, math.ceil(len(dl_train)/args.grad_accum)):.4f} "
-                            f"lambda[min,max]=[{lam_min:.6f},{lam_max:.6f}]{lam_reg_str}")
+                lam_reg = getattr(loss_fn, '_last_lambda_reg', None)
+                lam_reg_str = f" lambda_reg={_scalar_float(lam_reg):.6f}" if lam_reg is not None else ""
+                print(f"[epoch {epoch}] train_loss(avg per step)={train_loss_avg:.4f} "
+                        f"lambda[min,max]=[{lam_min:.6f},{lam_max:.6f}]{lam_reg_str}")
 
             val_loss, cms, qwks, emds, macro_emd, tail_recalls, tail_recall_avg, ids_e, y_e, p_e = evaluate(
                 model.module if is_dist() else model,
@@ -1167,9 +1251,7 @@ def main():
                 if run_wandb is not None:
                     log = {
                         "epoch": int(epoch),
-                        "train/loss_epoch": float(
-                            running / max(1, math.ceil(len(dl_train) / args.grad_accum))
-                        ),
+                        "train/loss_epoch": train_loss_avg,
                         "val/loss": float(val_loss),
                         "val/qwk_average": float(avg_qwk),
                         "val/macroEMD": float(macro_emd),
@@ -1198,7 +1280,7 @@ def main():
                     metrics_path = os.path.join(args.save_dir, "epoch_metrics.csv")
                     row = {
                         "epoch": int(epoch),
-                        "train_loss_avg": float(running / max(1, math.ceil(len(dl_train)/args.grad_accum))),
+                        "train_loss_avg": train_loss_avg,
                         "val_loss": float(val_loss),
                         "qwk_avg": float(avg_qwk),
                         "macroEMD": float(macro_emd),
@@ -1318,7 +1400,6 @@ def main():
                         _log_cms_as_wandb_images(tcms, split="test", head_names=head_names, level_offset=level_offset, step=global_step)
 
                     # write compact metrics.json
-                    run_args = vars(args).copy()
                     metrics = {
                         "val": {
                             "loss": val_loss,
@@ -1340,16 +1421,7 @@ def main():
                             "tail_recall0": ttails,
                             "tail_recall0_average": ttails_avg,
                         },
-                        "args": {
-                            k: run_args[k] for k in [
-                                "loss", "joint", "mixture", "conf_gating", "reassignment",
-                                "lambda0", "alpha", "C",
-                                "ce_label_smoothing", "seed",
-                                "model_name", "max_length", "batch_size",
-                                "grad_accum", "epochs", "sched_epochs",
-                                "ens_mode", "ens_epoch_start", "ens_epoch_end", "ens_t", "ens_stride",
-                            ]
-                        }
+                        "args": _metrics_args_payload()
                     }
                     metrics.setdefault("extra", {})["static_stats"] = current_static_stats
                     with open(os.path.join(args.save_dir, "metrics.json"), "w") as f:
@@ -1450,6 +1522,7 @@ def main():
                 else:
                     obj["val"] = last_val_metrics
 
+                obj["args"] = _metrics_args_payload()
                 obj.setdefault("extra", {})["static_stats"] = obj.get("extra", {}).get("static_stats", final_static_stats)
                 with open(p, "w") as f:
                     json.dump(obj, f, indent=2)

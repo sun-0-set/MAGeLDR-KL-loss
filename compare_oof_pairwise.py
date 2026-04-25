@@ -31,8 +31,8 @@ def parse_args():
     )
     p.add_argument(
         "--window",
-        default="E8-14",
-        help="Ensemble window tag to compare, e.g. E8-14 or T10.",
+        default="T5",
+        help="Ensemble window tag to compare, e.g. T5 or E12-16.",
     )
     p.add_argument(
         "--metric",

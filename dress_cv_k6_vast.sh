@@ -16,17 +16,25 @@ Environment overrides:
   TOKEN_CACHE_DIR  Reusable token cache dir (default: alongside data file)
   EPOCHS           Actual training epochs (default: 16)
   SCHED_EPOCHS     Scheduler horizon in epochs (default: 40)
+  STAGE1_EPOCHS    two_stage_joint bare-joint epochs (default: 16)
+  STAGE1_SCHED_EPOCHS
+                   two_stage_joint bare-joint scheduler horizon (default: 40)
+  STAGE2_EPOCHS    two_stage_joint mixture adaptation epochs (default: 8)
+  STAGE2_SCHED_EPOCHS
+                   two_stage_joint adaptation scheduler horizon (default: 8)
+  ENS_MODE         fixed_range or tail (default: tail for two_stage_joint, fixed_range otherwise)
   ENS_EPOCH_START  First epoch in fixed OOF ensemble (default: 8)
   ENS_EPOCH_END    Last epoch in fixed OOF ensemble (default: 14)
-  BATCH            Per-device batch size (default: 16 for 4x H100 SXM)
-  ACCUM            Gradient accumulation steps (default: 1)
+  ENS_T            Number of trailing epochs for tail OOF (default: 5 for two_stage_joint, 10 otherwise)
+  BATCH            Per-device batch size (default: 8, matching dress_cv_k6.slurm)
+  ACCUM            Gradient accumulation steps (default: 2, matching dress_cv_k6.slurm)
   MAXLEN           Max sequence length (default: 808)
   NUM_WORKERS      DataLoader workers (default: 4)
   PREFETCH_FACTOR  DataLoader prefetch factor (default: 4)
   HF_OFFLINE       1 to force local HF assets only (default: 1)
   SAVE_MODEL       1 to save best.pt checkpoints (default: 0)
   GRAD_CKPT        1 to enable --grad_ckpt if memory is tight (default: 0)
-  JOB_SET          full (default), ce_only, or ce_sweep
+  JOB_SET          full (default; mirrors dress_cv_k6.slurm), ce_only, ce_sweep, or two_stage_joint
   RESUME           1 to skip jobs with .exit_code == 0 (default: 1)
   WANDB_ENABLED    1 to enable W&B logging (default: 0)
   WANDB_PROJECT    W&B project name (default: jager)
@@ -40,6 +48,7 @@ Environment overrides:
 Examples:
   ./dress_cv_k6_vast.sh 0 vast_20260410
   JOB_SET=ce_only BATCH=8 ACCUM=2 ./dress_cv_k6_vast.sh all vast_ce_20260418
+  JOB_SET=two_stage_joint NPROC_PER_NODE=4 ./dress_cv_k6_vast.sh all vast_2stage_20260425
   NPROC_PER_NODE=4 SAVE_MODEL=1 ./dress_cv_k6_vast.sh 3
 EOF
   exit 0
@@ -69,12 +78,32 @@ TOKEN_CACHE_DIR="${TOKEN_CACHE_DIR:-}"
 RESULTS_BASE="${RESULTS_BASE:-$SCRIPT_DIR/../results}"
 RESULTS_ROOT="${RESULTS_ROOT:-$RESULTS_BASE/$(basename "$SPLITS_DIR")/$RUN_ID}"
 
+JOB_SET="${JOB_SET:-full}"
 EPOCHS="${EPOCHS:-16}"
 SCHED_EPOCHS="${SCHED_EPOCHS:-40}"
+STAGE1_EPOCHS="${STAGE1_EPOCHS:-16}"
+STAGE1_SCHED_EPOCHS="${STAGE1_SCHED_EPOCHS:-40}"
+STAGE2_EPOCHS="${STAGE2_EPOCHS:-8}"
+STAGE2_SCHED_EPOCHS="${STAGE2_SCHED_EPOCHS:-8}"
+if [[ -z "${ENS_MODE:-}" ]]; then
+  if [[ "$JOB_SET" == "two_stage_joint" ]]; then
+    ENS_MODE="tail"
+  else
+    ENS_MODE="fixed_range"
+  fi
+fi
 ENS_EPOCH_START="${ENS_EPOCH_START:-8}"
 ENS_EPOCH_END="${ENS_EPOCH_END:-14}"
-BATCH="${BATCH:-16}"
-ACCUM="${ACCUM:-1}"
+if [[ -z "${ENS_T:-}" ]]; then
+  if [[ "$JOB_SET" == "two_stage_joint" ]]; then
+    ENS_T="5"
+  else
+    ENS_T="10"
+  fi
+fi
+ENS_STRIDE="${ENS_STRIDE:-1}"
+BATCH="${BATCH:-8}"
+ACCUM="${ACCUM:-2}"
 MAXLEN="${MAXLEN:-808}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
@@ -82,7 +111,6 @@ JAGER_DEBUG="${JAGER_DEBUG:-1}"
 HF_OFFLINE="${HF_OFFLINE:-1}"
 SAVE_MODEL="${SAVE_MODEL:-0}"
 GRAD_CKPT="${GRAD_CKPT:-0}"
-JOB_SET="${JOB_SET:-full}"
 RESUME="${RESUME:-1}"
 WANDB_ENABLED="${WANDB_ENABLED:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-jager}"
@@ -93,48 +121,65 @@ WANDB_JOB_TYPE="${WANDB_JOB_TYPE:-train}"
 WANDB_TAGS="${WANDB_TAGS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 MASTER_PORT_BASE="${MASTER_PORT_BASE:-29500}"
+TWO_STAGE_LAMBDA0S="${TWO_STAGE_LAMBDA0S:-1 2 3}"
+TWO_STAGE_CS="${TWO_STAGE_CS:-1e-2 2e-2 5e-2}"
 
-COMMON=(
+case "$ENS_MODE" in
+  fixed_range|tail) ;;
+  *)
+    echo "ERROR: ENS_MODE must be fixed_range or tail, got: $ENS_MODE"
+    exit 1
+    ;;
+esac
+
+COMMON_BASE=(
   --data_path "$DATA_PATH"
   --model_name "$MODEL"
   --max_length "$MAXLEN"
-  --epochs "$EPOCHS"
-  --sched_epochs "$SCHED_EPOCHS"
   --batch_size "$BATCH"
   --grad_accum "$ACCUM"
   --num_workers "$NUM_WORKERS"
   --prefetch_factor "$PREFETCH_FACTOR"
-  --ens_mode fixed_range
-  --ens_epoch_start "$ENS_EPOCH_START"
-  --ens_epoch_end "$ENS_EPOCH_END"
-  --ens_stride 1
 )
 
 if [[ -n "$TOKEN_CACHE_DIR" ]]; then
-  COMMON+=(--token_cache_dir "$TOKEN_CACHE_DIR")
+  COMMON_BASE+=(--token_cache_dir "$TOKEN_CACHE_DIR")
 fi
 
 if [[ "$HF_OFFLINE" == "1" ]]; then
-  COMMON+=(--hf_offline)
+  COMMON_BASE+=(--hf_offline)
 fi
 
 if [[ "$SAVE_MODEL" == "1" ]]; then
-  COMMON+=(--save_model)
+  COMMON_BASE+=(--save_model)
 fi
 
 if [[ "$GRAD_CKPT" == "1" ]]; then
-  COMMON+=(--grad_ckpt)
+  COMMON_BASE+=(--grad_ckpt)
 fi
 
 if [[ "$WANDB_ENABLED" == "1" ]]; then
-  COMMON+=(--wandb --wandb_project "$WANDB_PROJECT" --wandb_mode "$WANDB_MODE" --wandb_group "$WANDB_GROUP" --wandb_job_type "$WANDB_JOB_TYPE")
+  COMMON_BASE+=(--wandb --wandb_project "$WANDB_PROJECT" --wandb_mode "$WANDB_MODE" --wandb_group "$WANDB_GROUP" --wandb_job_type "$WANDB_JOB_TYPE")
   if [[ -n "$WANDB_ENTITY" ]]; then
-    COMMON+=(--wandb_entity "$WANDB_ENTITY")
+    COMMON_BASE+=(--wandb_entity "$WANDB_ENTITY")
   fi
   if [[ -n "$WANDB_TAGS" ]]; then
-    COMMON+=(--wandb_tags "$WANDB_TAGS")
+    COMMON_BASE+=(--wandb_tags "$WANDB_TAGS")
   fi
 fi
+
+make_common_args() {
+  local epochs="$1"
+  local sched_epochs="$2"
+  COMMON=("${COMMON_BASE[@]}" --epochs "$epochs" --sched_epochs "$sched_epochs")
+  if [[ "$ENS_MODE" == "tail" ]]; then
+    COMMON+=(--ens_mode tail --ens_t "$ENS_T" --ens_stride "$ENS_STRIDE")
+  else
+    COMMON+=(--ens_mode fixed_range --ens_epoch_start "$ENS_EPOCH_START" --ens_epoch_end "$ENS_EPOCH_END" --ens_stride "$ENS_STRIDE")
+  fi
+}
+
+make_common_args "$EPOCHS" "$SCHED_EPOCHS"
 
 EXTRA_ARGS_ARR=()
 if [[ -n "$EXTRA_ARGS" ]]; then
@@ -159,29 +204,22 @@ case "$JOB_SET" in
     )
     ;;
   full)
-    JOBS=(
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 5e-2"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 1e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 0.5 --C 2e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 5e-2"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 1e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 3 --lambda_min 1 --C 2e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 5e-2"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 1e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 0.5 --C 2e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 5e-2"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 1e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 5 --lambda_min 1 --C 2e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 5e-2"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 1e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 0.5 --C 2e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 5e-2"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 1e-1"
-      "jager --joint --mixture --no-conf_gating --no-reassignment --lambda0 10 --lambda_min 1 --C 2e-1"
-    )
+    JOBS=()
+    for MIXTURE_FLAG in "--no-mixture" "--mixture"; do
+      for LAMBDA0 in 1 2 3; do
+        for C in 1e-2 2e-2 5e-2; do
+          JOBS+=("jager --joint ${MIXTURE_FLAG} --no-conf_gating --no-reassignment --lambda0 ${LAMBDA0} --lambda_min 0.5 --C ${C}")
+        done
+      done
+    done
+    ;;
+  two_stage_joint)
+    JOBS=()
+    read -r -a TWO_STAGE_LAMBDA0_ARR <<<"$TWO_STAGE_LAMBDA0S"
+    read -r -a TWO_STAGE_C_ARR <<<"$TWO_STAGE_CS"
     ;;
   *)
-    echo "ERROR: JOB_SET must be 'full', 'ce_only', or 'ce_sweep', got: $JOB_SET"
+    echo "ERROR: JOB_SET must be 'full', 'ce_only', 'ce_sweep', or 'two_stage_joint', got: $JOB_SET"
     exit 1
     ;;
 esac
@@ -205,7 +243,16 @@ fi
 echo "[info] PWD=$PWD"
 echo "[info] RUN_ID=$RUN_ID FOLD=$FOLD NPROC_PER_NODE=$NPROC_PER_NODE"
 echo "[info] RESULTS_ROOT=$RESULTS_ROOT"
-echo "[info] EPOCHS=$EPOCHS SCHED_EPOCHS=$SCHED_EPOCHS OOF=E${ENS_EPOCH_START}-${ENS_EPOCH_END}"
+if [[ "$ENS_MODE" == "tail" ]]; then
+  OOF_DESC="T${ENS_T}"
+else
+  OOF_DESC="E${ENS_EPOCH_START}-${ENS_EPOCH_END}"
+fi
+echo "[info] EPOCHS=$EPOCHS SCHED_EPOCHS=$SCHED_EPOCHS OOF=$OOF_DESC"
+if [[ "$JOB_SET" == "two_stage_joint" ]]; then
+  echo "[info] STAGE1_EPOCHS=$STAGE1_EPOCHS STAGE1_SCHED_EPOCHS=$STAGE1_SCHED_EPOCHS"
+  echo "[info] STAGE2_EPOCHS=$STAGE2_EPOCHS STAGE2_SCHED_EPOCHS=$STAGE2_SCHED_EPOCHS"
+fi
 echo "[info] BATCH=$BATCH ACCUM=$ACCUM JOB_SET=$JOB_SET RESUME=$RESUME"
 echo "[info] WANDB_ENABLED=$WANDB_ENABLED WANDB_MODE=$WANDB_MODE WANDB_GROUP=$WANDB_GROUP"
 echo "[info] host=$(hostname)"
@@ -236,6 +283,134 @@ for FOLD in "${FOLDS[@]}"; do
 
   echo "[info] running fold ${FOLD} on host $(hostname)"
 
+  if [[ "$JOB_SET" == "two_stage_joint" ]]; then
+    for LAMBDA0 in "${TWO_STAGE_LAMBDA0_ARR[@]}"; do
+      for C in "${TWO_STAGE_C_ARR[@]}"; do
+        STAGE1_TAG="jager-two-stage-stage1-bare-joint-lambda0-${LAMBDA0}-C-${C}"
+        STAGE1_SAVE="${RESULTS_ROOT}/${STAGE1_TAG}/fold${FOLD}"
+        STAGE1_LOG="$STAGE1_SAVE/train.log"
+        STAGE1_EXIT_CODE_FILE="$STAGE1_SAVE/.exit_code"
+        STAGE1_BEST="$STAGE1_SAVE/best.pt"
+
+        mkdir -p "$STAGE1_SAVE"
+
+        STAGE1_READY=0
+        if [[ "$RESUME" == "1" && -f "$STAGE1_EXIT_CODE_FILE" ]]; then
+          prev_code="$(tr -d '[:space:]' < "$STAGE1_EXIT_CODE_FILE")"
+          if [[ "$prev_code" == "0" && -f "$STAGE1_BEST" ]]; then
+            echo ">> [fold ${FOLD}] ${STAGE1_TAG} already completed successfully; skipping"
+            STAGE1_READY=1
+          fi
+        fi
+
+        if [[ "$STAGE1_READY" == "0" ]]; then
+          echo ">> [fold ${FOLD}] ${STAGE1_TAG} -> $STAGE1_LOG"
+
+          set +e
+          make_common_args "$STAGE1_EPOCHS" "$STAGE1_SCHED_EPOCHS"
+          torchrun \
+            --nproc_per_node="$NPROC_PER_NODE" \
+            --master_port="$MASTER_PORT" \
+            "$SCRIPT_DIR/train.py" "${COMMON[@]}" \
+              --wandb_run_name "${RUN_ID}-fold${FOLD}-${STAGE1_TAG}" \
+              "${EXTRA_ARGS_ARR[@]}" \
+              --loss jager --joint --no-mixture --no-conf_gating --no-reassignment \
+              --lambda0 "$LAMBDA0" --lambda_min 0.5 --C "$C" \
+              --save_model \
+              --split_file "${SPLITS_DIR}/fold${FOLD}.json" \
+              --save_dir "$STAGE1_SAVE" \
+              >"$STAGE1_LOG" 2>&1
+
+          code=$?
+          echo "$code" > "$STAGE1_EXIT_CODE_FILE"
+
+          if [[ "$code" == "0" && -f "$STAGE1_BEST" ]]; then
+            STAGE1_READY=1
+          else
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            OVERALL_FAIL_COUNT=$((OVERALL_FAIL_COUNT + 1))
+            if [[ "$code" == "0" ]]; then
+              printf '%s\t%s\t%s\n' "$STAGE1_TAG" "missing-best.pt" "$STAGE1_LOG" >> "$FAIL_SUMMARY"
+              echo "!! [fold ${FOLD}] ${STAGE1_TAG} completed but did not write $STAGE1_BEST"
+            else
+              printf '%s\t%s\t%s\n' "$STAGE1_TAG" "$code" "$STAGE1_LOG" >> "$FAIL_SUMMARY"
+              echo "!! [fold ${FOLD}] ${STAGE1_TAG} FAILED (code $code). See $STAGE1_LOG"
+            fi
+          fi
+          set -e
+        fi
+
+        for CG in 0 1; do
+          for RA in 0 1; do
+            STAGE2_TAG="jager-two-stage-stage2-mixture-cg${CG}-ra${RA}-from-bare-lambda0-${LAMBDA0}-C-${C}"
+            STAGE2_SAVE="${RESULTS_ROOT}/${STAGE2_TAG}/fold${FOLD}"
+            STAGE2_LOG="$STAGE2_SAVE/train.log"
+            STAGE2_EXIT_CODE_FILE="$STAGE2_SAVE/.exit_code"
+            CG_ARG="--no-conf_gating"
+            RA_ARG="--no-reassignment"
+            if [[ "$CG" == "1" ]]; then
+              CG_ARG="--conf_gating"
+            fi
+            if [[ "$RA" == "1" ]]; then
+              RA_ARG="--reassignment"
+            fi
+
+            mkdir -p "$STAGE2_SAVE"
+
+            if [[ "$STAGE1_READY" != "1" ]]; then
+              {
+                echo "ERROR: stage 2 requires the stage 1 checkpoint."
+                echo "Missing or invalid checkpoint: $STAGE1_BEST"
+              } >"$STAGE2_LOG"
+              echo "1" > "$STAGE2_EXIT_CODE_FILE"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              OVERALL_FAIL_COUNT=$((OVERALL_FAIL_COUNT + 1))
+              printf '%s\t%s\t%s\n' "$STAGE2_TAG" "missing-stage1-best.pt" "$STAGE2_LOG" >> "$FAIL_SUMMARY"
+              echo "!! [fold ${FOLD}] ${STAGE2_TAG} refused to run; missing $STAGE1_BEST"
+              continue
+            fi
+
+            if [[ "$RESUME" == "1" && -f "$STAGE2_EXIT_CODE_FILE" ]]; then
+              prev_code="$(tr -d '[:space:]' < "$STAGE2_EXIT_CODE_FILE")"
+              if [[ "$prev_code" == "0" ]]; then
+                echo ">> [fold ${FOLD}] ${STAGE2_TAG} already completed successfully; skipping"
+                continue
+              fi
+            fi
+
+            echo ">> [fold ${FOLD}] ${STAGE2_TAG} -> $STAGE2_LOG"
+
+            set +e
+            make_common_args "$STAGE2_EPOCHS" "$STAGE2_SCHED_EPOCHS"
+            torchrun \
+              --nproc_per_node="$NPROC_PER_NODE" \
+              --master_port="$MASTER_PORT" \
+              "$SCRIPT_DIR/train.py" "${COMMON[@]}" \
+                --wandb_run_name "${RUN_ID}-fold${FOLD}-${STAGE2_TAG}" \
+                "${EXTRA_ARGS_ARR[@]}" \
+                --loss jager --joint --mixture "$CG_ARG" "$RA_ARG" \
+                --lambda0 "$LAMBDA0" --lambda_min 0.5 --C "$C" \
+                --init_model_from "$STAGE1_BEST" \
+                --save_model \
+                --split_file "${SPLITS_DIR}/fold${FOLD}.json" \
+                --save_dir "$STAGE2_SAVE" \
+                >"$STAGE2_LOG" 2>&1
+
+            code=$?
+            echo "$code" > "$STAGE2_EXIT_CODE_FILE"
+
+            if [[ "$code" != 0 ]]; then
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              OVERALL_FAIL_COUNT=$((OVERALL_FAIL_COUNT + 1))
+              printf '%s\t%s\t%s\n' "$STAGE2_TAG" "$code" "$STAGE2_LOG" >> "$FAIL_SUMMARY"
+              echo "!! [fold ${FOLD}] ${STAGE2_TAG} FAILED (code $code). See $STAGE2_LOG"
+            fi
+            set -e
+          done
+        done
+      done
+    done
+  else
   for job in "${JOBS[@]}"; do
     read -r LOSS ARGS <<<"$job"
 
@@ -288,6 +463,7 @@ for FOLD in "${FOLDS[@]}"; do
     fi
     set -e
   done
+  fi
 
   if (( FAIL_COUNT > 0 )); then
     echo "[summary] Fold ${FOLD} finished with ${FAIL_COUNT} failed run(s). See $FAIL_SUMMARY"

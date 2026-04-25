@@ -150,7 +150,7 @@ def oof_metrics_from_df(df: pd.DataFrame, heads=None):
     """
     Compute per-head OOF metrics from a concatenated OOF dataframe:
       - QWK via sklearn (quadratic)
-      - EMD via scipy (normalized)
+      - EMD via scipy (normalized), class-balanced like train.py
       - averages across heads
     """
     if heads is None:
@@ -186,11 +186,20 @@ def oof_metrics_from_df(df: pd.DataFrame, heads=None):
         q = cohen_kappa_score(y, y_pred, weights="quadratic")
         qwk_vals.append(q)
 
-        emds = [
+        sample_emds = np.array([
             emd_one_sample(P[i], int(y[i]), label_values=label_values)
             for i in range(len(y))
+        ], dtype=float)
+        class_emd_means = [
+            float(sample_emds[y == int(label)].mean())
+            for label in label_values
+            if np.any(y == int(label))
         ]
-        emd_mean = float(np.mean(emds))
+        emd_mean = (
+            float(np.nanmean(np.asarray(class_emd_means, dtype=float)))
+            if class_emd_means
+            else float("nan")
+        )
 
         emd_vals.append(emd_mean)
         out[f"qwk_{h}"] = float(q)
