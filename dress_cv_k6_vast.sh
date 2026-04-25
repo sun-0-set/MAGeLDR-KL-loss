@@ -33,6 +33,10 @@ Environment overrides:
   PREFETCH_FACTOR  DataLoader prefetch factor (default: 4)
   HF_OFFLINE       1 to force local HF assets only (default: 1)
   SAVE_MODEL       1 to save best.pt checkpoints (default: 0)
+  STAGE2_SAVE_MODEL
+                   two_stage_joint: 1 to keep stage-2 best.pt files (default: 0)
+  KEEP_STAGE1_BEST two_stage_joint: 1 to keep stage-1 handoff best.pt files after
+                   stage-2 fanout completes (default: 0)
   GRAD_CKPT        1 to enable --grad_ckpt if memory is tight (default: 0)
   JOB_SET          full (default; mirrors dress_cv_k6.slurm), ce_only, ce_sweep, or two_stage_joint
   RESUME           1 to skip jobs with .exit_code == 0 (default: 1)
@@ -85,6 +89,8 @@ STAGE1_EPOCHS="${STAGE1_EPOCHS:-16}"
 STAGE1_SCHED_EPOCHS="${STAGE1_SCHED_EPOCHS:-40}"
 STAGE2_EPOCHS="${STAGE2_EPOCHS:-8}"
 STAGE2_SCHED_EPOCHS="${STAGE2_SCHED_EPOCHS:-8}"
+STAGE2_SAVE_MODEL="${STAGE2_SAVE_MODEL:-0}"
+KEEP_STAGE1_BEST="${KEEP_STAGE1_BEST:-0}"
 if [[ -z "${ENS_MODE:-}" ]]; then
   if [[ "$JOB_SET" == "two_stage_joint" ]]; then
     ENS_MODE="tail"
@@ -150,7 +156,7 @@ if [[ "$HF_OFFLINE" == "1" ]]; then
   COMMON_BASE+=(--hf_offline)
 fi
 
-if [[ "$SAVE_MODEL" == "1" ]]; then
+if [[ "$SAVE_MODEL" == "1" && "$JOB_SET" != "two_stage_joint" ]]; then
   COMMON_BASE+=(--save_model)
 fi
 
@@ -252,6 +258,7 @@ echo "[info] EPOCHS=$EPOCHS SCHED_EPOCHS=$SCHED_EPOCHS OOF=$OOF_DESC"
 if [[ "$JOB_SET" == "two_stage_joint" ]]; then
   echo "[info] STAGE1_EPOCHS=$STAGE1_EPOCHS STAGE1_SCHED_EPOCHS=$STAGE1_SCHED_EPOCHS"
   echo "[info] STAGE2_EPOCHS=$STAGE2_EPOCHS STAGE2_SCHED_EPOCHS=$STAGE2_SCHED_EPOCHS"
+  echo "[info] STAGE2_SAVE_MODEL=$STAGE2_SAVE_MODEL KEEP_STAGE1_BEST=$KEEP_STAGE1_BEST"
 fi
 echo "[info] BATCH=$BATCH ACCUM=$ACCUM JOB_SET=$JOB_SET RESUME=$RESUME"
 echo "[info] WANDB_ENABLED=$WANDB_ENABLED WANDB_MODE=$WANDB_MODE WANDB_GROUP=$WANDB_GROUP"
@@ -346,6 +353,7 @@ for FOLD in "${FOLDS[@]}"; do
             STAGE2_SAVE="${RESULTS_ROOT}/${STAGE2_TAG}/fold${FOLD}"
             STAGE2_LOG="$STAGE2_SAVE/train.log"
             STAGE2_EXIT_CODE_FILE="$STAGE2_SAVE/.exit_code"
+            STAGE2_SAVE_MODEL_ARGS=()
             CG_ARG="--no-conf_gating"
             RA_ARG="--no-reassignment"
             if [[ "$CG" == "1" ]]; then
@@ -353,6 +361,9 @@ for FOLD in "${FOLDS[@]}"; do
             fi
             if [[ "$RA" == "1" ]]; then
               RA_ARG="--reassignment"
+            fi
+            if [[ "$STAGE2_SAVE_MODEL" == "1" ]]; then
+              STAGE2_SAVE_MODEL_ARGS=(--save_model)
             fi
 
             mkdir -p "$STAGE2_SAVE"
@@ -391,7 +402,7 @@ for FOLD in "${FOLDS[@]}"; do
                 --loss jager --joint --mixture "$CG_ARG" "$RA_ARG" \
                 --lambda0 "$LAMBDA0" --lambda_min 0.5 --C "$C" \
                 --init_model_from "$STAGE1_BEST" \
-                --save_model \
+                "${STAGE2_SAVE_MODEL_ARGS[@]}" \
                 --split_file "${SPLITS_DIR}/fold${FOLD}.json" \
                 --save_dir "$STAGE2_SAVE" \
                 >"$STAGE2_LOG" 2>&1
@@ -408,6 +419,11 @@ for FOLD in "${FOLDS[@]}"; do
             set -e
           done
         done
+
+        if [[ "$KEEP_STAGE1_BEST" != "1" && -f "$STAGE1_BEST" ]]; then
+          rm -f "$STAGE1_BEST"
+          echo ">> [fold ${FOLD}] ${STAGE1_TAG} pruned handoff checkpoint: $STAGE1_BEST"
+        fi
       done
     done
   else
