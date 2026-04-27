@@ -33,12 +33,28 @@ Environment overrides:
   PREFETCH_FACTOR  DataLoader prefetch factor (default: 4)
   HF_OFFLINE       1 to force local HF assets only (default: 1)
   SAVE_MODEL       1 to save best.pt checkpoints (default: 0)
+  SAVE_EPOCH_VAL_PREDS
+                   1 to save epoch_val_preds.npz for all validation epochs (default: 0)
   STAGE2_SAVE_MODEL
                    two_stage_joint: 1 to keep stage-2 best.pt files (default: 0)
   KEEP_STAGE1_BEST two_stage_joint: 1 to keep stage-1 handoff best.pt files after
                    stage-2 fanout completes (default: 0)
   GRAD_CKPT        1 to enable --grad_ckpt if memory is tight (default: 0)
-  JOB_SET          full (default; mirrors dress_cv_k6.slurm), ce_only, ce_sweep, or two_stage_joint
+  JOB_SET          full (default; mirrors dress_cv_k6.slurm), ce_only, ce_sweep,
+                   two_stage_joint, or leader_ce05_paired
+  PAIR_SEEDS       leader_ce05_paired seeds (default: "42 43 44 45 46")
+  LEADER_LAMBDA0   leader_ce05_paired JAGeR lambda0 (default: 3)
+  LEADER_C         leader_ce05_paired JAGeR C (default: 5e-2)
+  CE_SMOOTHING     leader_ce05_paired CE label smoothing (default: 0.05)
+  LEADER_ENS_MODE  leader_ce05_paired JAGeR OOF mode (default: tail)
+  LEADER_ENS_T     leader_ce05_paired JAGeR tail OOF T (default: 5)
+  CE_ENS_MODE      leader_ce05_paired CE OOF mode (default: fixed_range)
+  CE_ENS_EPOCH_START
+                   leader_ce05_paired CE fixed OOF start (default: 8)
+  CE_ENS_EPOCH_END leader_ce05_paired CE fixed OOF end (default: 14)
+  PAIR_WINDOW_MATRIX
+                   leader_ce05_paired: 1 runs both methods under both OOF
+                   windows for paper sensitivity (default: 1)
   RESUME           1 to skip jobs with .exit_code == 0 (default: 1)
   WANDB_ENABLED    1 to enable W&B logging (default: 0)
   WANDB_PROJECT    W&B project name (default: jager)
@@ -53,6 +69,7 @@ Examples:
   ./dress_cv_k6_vast.sh 0 vast_20260410
   JOB_SET=ce_only BATCH=8 ACCUM=2 ./dress_cv_k6_vast.sh all vast_ce_20260418
   JOB_SET=two_stage_joint NPROC_PER_NODE=4 ./dress_cv_k6_vast.sh all vast_2stage_20260425
+  JOB_SET=leader_ce05_paired PAIR_SEEDS="42 43 44 45 46" ./dress_cv_k6_vast.sh all vast_leader_ce05_s5
   NPROC_PER_NODE=4 SAVE_MODEL=1 ./dress_cv_k6_vast.sh 3
 EOF
   exit 0
@@ -116,6 +133,7 @@ PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 JAGER_DEBUG="${JAGER_DEBUG:-1}"
 HF_OFFLINE="${HF_OFFLINE:-1}"
 SAVE_MODEL="${SAVE_MODEL:-0}"
+SAVE_EPOCH_VAL_PREDS="${SAVE_EPOCH_VAL_PREDS:-0}"
 GRAD_CKPT="${GRAD_CKPT:-0}"
 RESUME="${RESUME:-1}"
 WANDB_ENABLED="${WANDB_ENABLED:-0}"
@@ -129,6 +147,23 @@ EXTRA_ARGS="${EXTRA_ARGS:-}"
 MASTER_PORT_BASE="${MASTER_PORT_BASE:-29500}"
 TWO_STAGE_LAMBDA0S="${TWO_STAGE_LAMBDA0S:-1 2 3}"
 TWO_STAGE_CS="${TWO_STAGE_CS:-1e-2 2e-2 5e-2}"
+PAIR_SEEDS="${PAIR_SEEDS:-42 43 44 45 46}"
+LEADER_LAMBDA0="${LEADER_LAMBDA0:-3}"
+LEADER_C="${LEADER_C:-5e-2}"
+LEADER_EPOCHS="${LEADER_EPOCHS:-$STAGE1_EPOCHS}"
+LEADER_SCHED_EPOCHS="${LEADER_SCHED_EPOCHS:-$STAGE1_SCHED_EPOCHS}"
+LEADER_ENS_MODE="${LEADER_ENS_MODE:-tail}"
+LEADER_ENS_T="${LEADER_ENS_T:-5}"
+LEADER_ENS_EPOCH_START="${LEADER_ENS_EPOCH_START:-$ENS_EPOCH_START}"
+LEADER_ENS_EPOCH_END="${LEADER_ENS_EPOCH_END:-$ENS_EPOCH_END}"
+CE_SMOOTHING="${CE_SMOOTHING:-0.05}"
+CE_EPOCHS="${CE_EPOCHS:-$EPOCHS}"
+CE_SCHED_EPOCHS="${CE_SCHED_EPOCHS:-$SCHED_EPOCHS}"
+CE_ENS_MODE="${CE_ENS_MODE:-fixed_range}"
+CE_ENS_T="${CE_ENS_T:-$ENS_T}"
+CE_ENS_EPOCH_START="${CE_ENS_EPOCH_START:-8}"
+CE_ENS_EPOCH_END="${CE_ENS_EPOCH_END:-14}"
+PAIR_WINDOW_MATRIX="${PAIR_WINDOW_MATRIX:-1}"
 
 case "$ENS_MODE" in
   fixed_range|tail) ;;
@@ -160,6 +195,10 @@ if [[ "$SAVE_MODEL" == "1" && "$JOB_SET" != "two_stage_joint" ]]; then
   COMMON_BASE+=(--save_model)
 fi
 
+if [[ "$SAVE_EPOCH_VAL_PREDS" == "1" ]]; then
+  COMMON_BASE+=(--save_epoch_val_preds)
+fi
+
 if [[ "$GRAD_CKPT" == "1" ]]; then
   COMMON_BASE+=(--grad_ckpt)
 fi
@@ -177,12 +216,24 @@ fi
 make_common_args() {
   local epochs="$1"
   local sched_epochs="$2"
+  local ens_mode="${3:-$ENS_MODE}"
+  local ens_epoch_start="${4:-$ENS_EPOCH_START}"
+  local ens_epoch_end="${5:-$ENS_EPOCH_END}"
+  local ens_t="${6:-$ENS_T}"
+  local ens_stride="${7:-$ENS_STRIDE}"
   COMMON=("${COMMON_BASE[@]}" --epochs "$epochs" --sched_epochs "$sched_epochs")
-  if [[ "$ENS_MODE" == "tail" ]]; then
-    COMMON+=(--ens_mode tail --ens_t "$ENS_T" --ens_stride "$ENS_STRIDE")
-  else
-    COMMON+=(--ens_mode fixed_range --ens_epoch_start "$ENS_EPOCH_START" --ens_epoch_end "$ENS_EPOCH_END" --ens_stride "$ENS_STRIDE")
-  fi
+  case "$ens_mode" in
+    tail)
+      COMMON+=(--ens_mode tail --ens_t "$ens_t" --ens_stride "$ens_stride")
+      ;;
+    fixed_range)
+      COMMON+=(--ens_mode fixed_range --ens_epoch_start "$ens_epoch_start" --ens_epoch_end "$ens_epoch_end" --ens_stride "$ens_stride")
+      ;;
+    *)
+      echo "ERROR: ensemble mode must be fixed_range or tail, got: $ens_mode"
+      exit 1
+      ;;
+  esac
 }
 
 make_common_args "$EPOCHS" "$SCHED_EPOCHS"
@@ -224,8 +275,12 @@ case "$JOB_SET" in
     read -r -a TWO_STAGE_LAMBDA0_ARR <<<"$TWO_STAGE_LAMBDA0S"
     read -r -a TWO_STAGE_C_ARR <<<"$TWO_STAGE_CS"
     ;;
+  leader_ce05_paired)
+    JOBS=()
+    read -r -a PAIR_SEED_ARR <<<"$PAIR_SEEDS"
+    ;;
   *)
-    echo "ERROR: JOB_SET must be 'full', 'ce_only', 'ce_sweep', or 'two_stage_joint', got: $JOB_SET"
+    echo "ERROR: JOB_SET must be 'full', 'ce_only', 'ce_sweep', 'two_stage_joint', or 'leader_ce05_paired', got: $JOB_SET"
     exit 1
     ;;
 esac
@@ -259,6 +314,11 @@ if [[ "$JOB_SET" == "two_stage_joint" ]]; then
   echo "[info] STAGE1_EPOCHS=$STAGE1_EPOCHS STAGE1_SCHED_EPOCHS=$STAGE1_SCHED_EPOCHS"
   echo "[info] STAGE2_EPOCHS=$STAGE2_EPOCHS STAGE2_SCHED_EPOCHS=$STAGE2_SCHED_EPOCHS"
   echo "[info] STAGE2_SAVE_MODEL=$STAGE2_SAVE_MODEL KEEP_STAGE1_BEST=$KEEP_STAGE1_BEST"
+elif [[ "$JOB_SET" == "leader_ce05_paired" ]]; then
+  echo "[info] PAIR_SEEDS=$PAIR_SEEDS"
+  echo "[info] LEADER lambda0=$LEADER_LAMBDA0 C=$LEADER_C epochs=$LEADER_EPOCHS sched=$LEADER_SCHED_EPOCHS OOF=${LEADER_ENS_MODE}"
+  echo "[info] CE smoothing=$CE_SMOOTHING epochs=$CE_EPOCHS sched=$CE_SCHED_EPOCHS OOF=${CE_ENS_MODE}"
+  echo "[info] PAIR_WINDOW_MATRIX=$PAIR_WINDOW_MATRIX"
 fi
 echo "[info] BATCH=$BATCH ACCUM=$ACCUM JOB_SET=$JOB_SET RESUME=$RESUME"
 echo "[info] WANDB_ENABLED=$WANDB_ENABLED WANDB_MODE=$WANDB_MODE WANDB_GROUP=$WANDB_GROUP"
@@ -424,6 +484,108 @@ for FOLD in "${FOLDS[@]}"; do
           rm -f "$STAGE1_BEST"
           echo ">> [fold ${FOLD}] ${STAGE1_TAG} pruned handoff checkpoint: $STAGE1_BEST"
         fi
+      done
+    done
+  elif [[ "$JOB_SET" == "leader_ce05_paired" ]]; then
+    LEADER_BASE_TAG="jager-leader-bare-joint-lambda0-${LEADER_LAMBDA0}-C-${LEADER_C}"
+    CE_BASE_TAG="ce-label-smoothing-${CE_SMOOTHING}"
+    LEADER_WINDOW_TAG="T${LEADER_ENS_T}"
+    if [[ "$LEADER_ENS_MODE" == "fixed_range" ]]; then
+      LEADER_WINDOW_TAG="E${LEADER_ENS_EPOCH_START}-${LEADER_ENS_EPOCH_END}"
+    fi
+    CE_WINDOW_TAG="T${CE_ENS_T}"
+    if [[ "$CE_ENS_MODE" == "fixed_range" ]]; then
+      CE_WINDOW_TAG="E${CE_ENS_EPOCH_START}-${CE_ENS_EPOCH_END}"
+    fi
+
+    for SEED in "${PAIR_SEED_ARR[@]}"; do
+      PAIR_JOBS=("leader:leader")
+      if [[ "$PAIR_WINDOW_MATRIX" == "1" ]]; then
+        PAIR_JOBS+=("leader:ce" "ce05:leader")
+      fi
+      PAIR_JOBS+=("ce05:ce")
+
+      for PAIR_SPEC in "${PAIR_JOBS[@]}"; do
+        METHOD_KEY="${PAIR_SPEC%%:*}"
+        WINDOW_KEY="${PAIR_SPEC##*:}"
+
+        case "$METHOD_KEY" in
+          leader)
+            BASE_TAG="$LEADER_BASE_TAG"
+            JOB_ARGS=(
+              --loss jager --joint --no-mixture --no-conf_gating --no-reassignment
+              --lambda0 "$LEADER_LAMBDA0" --lambda_min 0.5 --C "$LEADER_C"
+            )
+            EPOCHS_FOR_JOB="$LEADER_EPOCHS"
+            SCHED_FOR_JOB="$LEADER_SCHED_EPOCHS"
+            ;;
+          ce05)
+            BASE_TAG="$CE_BASE_TAG"
+            JOB_ARGS=(--loss ce --ce_label_smoothing "$CE_SMOOTHING")
+            EPOCHS_FOR_JOB="$CE_EPOCHS"
+            SCHED_FOR_JOB="$CE_SCHED_EPOCHS"
+            ;;
+          *)
+            echo "ERROR: unknown paired method key: $METHOD_KEY"
+            exit 1
+            ;;
+        esac
+
+        case "$WINDOW_KEY" in
+          leader)
+            WINDOW_TAG="$LEADER_WINDOW_TAG"
+            make_common_args "$EPOCHS_FOR_JOB" "$SCHED_FOR_JOB" "$LEADER_ENS_MODE" "$LEADER_ENS_EPOCH_START" "$LEADER_ENS_EPOCH_END" "$LEADER_ENS_T" "$ENS_STRIDE"
+            ;;
+          ce)
+            WINDOW_TAG="$CE_WINDOW_TAG"
+            make_common_args "$EPOCHS_FOR_JOB" "$SCHED_FOR_JOB" "$CE_ENS_MODE" "$CE_ENS_EPOCH_START" "$CE_ENS_EPOCH_END" "$CE_ENS_T" "$ENS_STRIDE"
+            ;;
+          *)
+            echo "ERROR: unknown paired window key: $WINDOW_KEY"
+            exit 1
+            ;;
+        esac
+
+        TAG="${BASE_TAG}-${WINDOW_TAG}"
+        SAVE="${RESULTS_ROOT}/seed${SEED}/${TAG}/fold${FOLD}"
+
+        mkdir -p "$SAVE"
+        LOG="$SAVE/train.log"
+        EXIT_CODE_FILE="$SAVE/.exit_code"
+
+        if [[ "$RESUME" == "1" && -f "$EXIT_CODE_FILE" ]]; then
+          prev_code="$(tr -d '[:space:]' < "$EXIT_CODE_FILE")"
+          if [[ "$prev_code" == "0" ]]; then
+            echo ">> [fold ${FOLD} seed ${SEED}] ${TAG} already completed successfully; skipping"
+            continue
+          fi
+        fi
+
+        echo ">> [fold ${FOLD} seed ${SEED}] ${TAG} -> $LOG"
+
+        set +e
+        torchrun \
+          --nproc_per_node="$NPROC_PER_NODE" \
+          --master_port="$MASTER_PORT" \
+          "$SCRIPT_DIR/train.py" "${COMMON[@]}" \
+            --wandb_run_name "${RUN_ID}-seed${SEED}-fold${FOLD}-${TAG}" \
+            "${EXTRA_ARGS_ARR[@]}" \
+            "${JOB_ARGS[@]}" \
+            --seed "$SEED" \
+            --split_file "${SPLITS_DIR}/fold${FOLD}.json" \
+            --save_dir "$SAVE" \
+            >"$LOG" 2>&1
+
+        code=$?
+        echo "$code" > "$EXIT_CODE_FILE"
+
+        if [[ "$code" != 0 ]]; then
+          FAIL_COUNT=$((FAIL_COUNT + 1))
+          OVERALL_FAIL_COUNT=$((OVERALL_FAIL_COUNT + 1))
+          printf '%s\t%s\t%s\n' "seed${SEED}/${TAG}" "$code" "$LOG" >> "$FAIL_SUMMARY"
+          echo "!! [fold ${FOLD} seed ${SEED}] ${TAG} FAILED (code $code). See $LOG"
+        fi
+        set -e
       done
     done
   else

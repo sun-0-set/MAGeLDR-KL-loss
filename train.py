@@ -291,6 +291,11 @@ def parse_args():
         default=1,
         help="Stride applied after selecting OOF ensemble epochs.",
     )
+    p.add_argument(
+        "--save_epoch_val_preds",
+        action="store_true",
+        help="Save all per-epoch validation probabilities to epoch_val_preds.npz for window audits.",
+    )
     p.add_argument("--val_frac", type=float, default=0.1,
                    help="If no --split_file, fraction used for validation.")
     p.add_argument("--limit_train", type=int, default=0, help="use only N training examples (0=all)")
@@ -1434,6 +1439,39 @@ def main():
 
         # ---------- Probability ensembling on VAL (OOF for this fold) ----------
         if is_main_process() and len(val_pred_epochs) > 0:
+            if bool(getattr(args, "save_epoch_val_preds", False)):
+                base_ids_for_save = val_pred_epochs[0]["ids"]
+                for rec in val_pred_epochs[1:]:
+                    if not np.array_equal(base_ids_for_save, rec["ids"]):
+                        raise RuntimeError("Validation ids changed across epochs; cannot save epoch_val_preds.npz.")
+                save_head_names = list(val_pred_epochs[0]["p"].keys())
+                y_stack = np.stack([val_pred_epochs[0]["y"][h] for h in save_head_names], axis=0)
+                p_stack = np.stack(
+                    [
+                        np.stack([rec["p"][h] for h in save_head_names], axis=0)
+                        for rec in val_pred_epochs
+                    ],
+                    axis=0,
+                ).astype(np.float32, copy=False)
+                epoch_arr = np.asarray([int(rec["epoch"]) for rec in val_pred_epochs], dtype=np.int16)
+                classes_arr = np.arange(
+                    int(args.level_offset),
+                    int(args.level_offset) + int(args.K),
+                    dtype=np.int16,
+                )
+                epoch_pred_path = os.path.join(args.save_dir, "epoch_val_preds.npz")
+                os.makedirs(args.save_dir, exist_ok=True)
+                np.savez_compressed(
+                    epoch_pred_path,
+                    epochs=epoch_arr,
+                    ids=base_ids_for_save.astype(np.int64, copy=False),
+                    y=y_stack.astype(np.int16, copy=False),
+                    p=p_stack,
+                    classes=classes_arr,
+                    head_names=np.asarray(save_head_names, dtype=object),
+                )
+                print(f"[oof] wrote per-epoch validation predictions: {epoch_pred_path}")
+
             ens_mode = str(getattr(args, "ens_mode", "fixed_range"))
             S = max(1, int(getattr(args, "ens_stride", 1)))
             if ens_mode == "fixed_range":
