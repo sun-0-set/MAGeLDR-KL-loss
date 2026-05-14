@@ -1,6 +1,6 @@
 import math, os, random, argparse, csv, json, re, shutil, subprocess
 import contextlib
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict, cast, overload
 import torch
 from torch import nn, amp
 import torch.nn.functional as F
@@ -173,6 +173,7 @@ def _dataset_row_ids(ds) -> np.ndarray:
 
 
 def _get_nvidia_driver_version() -> tuple[str | None, str]:
+    smi_err = "nvidia-smi not checked"
     nvidia_smi = shutil.which("nvidia-smi")
     if nvidia_smi:
         try:
@@ -366,6 +367,8 @@ def parse_args():
     p.add_argument("--lambda_min", type=float, help="minimum λ (JAGeR); overrides alpha if set")
     p.add_argument("--alpha", type=float, default=2.0, help="α (JAGeR)")
     p.add_argument("--C", type=float, default=1e-1, help="margin C (JAGeR)")
+    p.add_argument("--ldam", action=argparse.BooleanOptionalAction, default=True,
+               help="JAGeR: use count-scaled label-distributionally aware margins; --no-ldam uses constant C")
     p.add_argument("--ce_label_smoothing", type=float, default=0.0, help="label smoothing for CE baseline")
 
     # --- Evaluation / run modes ---------------------------------------
@@ -396,6 +399,14 @@ def parse_args():
         if args.epochs < args.ens_epoch_end:
             p.error("--epochs must be greater than or equal to --ens_epoch_end when --ens_mode fixed_range.")
     return args
+
+
+@overload
+def evaluate(model, dl, loss_fn, device, args=None, return_payload: Literal[False] = False) -> tuple[float, list[Any], list[Any], list[Any], float, list[Any], float]: ...
+
+
+@overload
+def evaluate(model, dl, loss_fn, device, args=None, return_payload: Literal[True] = True) -> tuple[float, list[Any], list[Any], list[Any], float, list[Any], float, np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray]]: ...
 
 
 def evaluate(model, dl, loss_fn, device, args=None, return_payload: bool = False):
@@ -442,7 +453,8 @@ def evaluate(model, dl, loss_fn, device, args=None, return_payload: bool = False
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):  # type: ignore[attr-defined]
                 out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-            y_pred = (out["logits"] if isinstance(out, dict) and "logits" in out else out)  # type: ignore[union-attr]
+            y_pred = out["logits"] if isinstance(out, dict) and "logits" in out else out
+            y_pred = cast(torch.Tensor, y_pred)
             if args.loss == "jager": y_pred = y_pred.to(torch.float64)
             logits_dtype = y_pred.dtype
             if isinstance(loss_fn, JAGeRLoss):
@@ -525,7 +537,13 @@ def evaluate(model, dl, loss_fn, device, args=None, return_payload: bool = False
         emds.append(float(np.nanmean(per_class_emd)))
 
         minority = list(args.minority_classes[h])  # must be present
-        per_class_rec = recall_score(y_t, y_p, labels=label_list, average=None, zero_division=0)
+        per_class_rec = recall_score(
+            y_t,
+            y_p,
+            labels=label_list,
+            average=cast(Any, None),
+            zero_division=cast(Any, 0),
+        )
         mr = [per_class_rec[c - level_offset] for c in minority]  # type: ignore[index]
         tail_recalls.append(float(np.mean(mr)) if mr else float("nan"))
 
@@ -955,6 +973,7 @@ def main():
                 λmin=getattr(args, "lambda_min", None),
                 α=args.alpha,
                 C=args.C,
+                LDAM=bool(args.ldam),
                 log_to_wandb=bool(getattr(args, "wandb", False)),
                 def_batch_size=effective_micro_batch,
                 steps_per_epoch=len(dl_train)

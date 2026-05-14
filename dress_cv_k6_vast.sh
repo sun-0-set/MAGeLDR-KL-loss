@@ -41,7 +41,7 @@ Environment overrides:
                    stage-2 fanout completes (default: 0)
   GRAD_CKPT        1 to enable --grad_ckpt if memory is tight (default: 0)
   JOB_SET          full (default; mirrors dress_cv_k6.slurm), ce_only, ce_sweep,
-                   two_stage_joint, or leader_ce05_paired
+                   two_stage_joint, leader_ce05_paired, or jager_seeded
   PAIR_SEEDS       leader_ce05_paired seeds (default: "42 43 44 45 46")
   LEADER_LAMBDA0   leader_ce05_paired JAGeR lambda0 (default: 3)
   LEADER_C         leader_ce05_paired JAGeR C (default: 5e-2)
@@ -55,6 +55,27 @@ Environment overrides:
   PAIR_WINDOW_MATRIX
                    leader_ce05_paired: 1 runs both methods under both OOF
                    windows for paper sensitivity (default: 1)
+  PAIR_INCLUDE_CE  leader_ce05_paired: 1 includes the CE baseline job
+                   (default: 1)
+  JAGER_SEEDS      jager_seeded seeds (default: "42")
+  JAGER_JOINT      jager_seeded: 1 uses --joint, 0 uses --no-joint (default: 1)
+  JAGER_MIXTURE    jager_seeded: 1 uses --mixture, 0 uses --no-mixture (default: 0)
+  JAGER_CONF_GATING
+                   jager_seeded: 1 enables confidence gating (default: 0)
+  JAGER_REASSIGNMENT
+                   jager_seeded: 1 enables reassignment (default: 0)
+  JAGER_LAMBDA0    jager_seeded lambda0 (default: 3)
+  JAGER_LAMBDA_MIN jager_seeded lambda_min (default: 0.5)
+  JAGER_C          jager_seeded C (default: 5e-2)
+  JAGER_EPOCHS     jager_seeded epochs (default: EPOCHS)
+  JAGER_SCHED_EPOCHS
+                   jager_seeded scheduler horizon (default: SCHED_EPOCHS)
+  JAGER_ENS_MODE   jager_seeded OOF mode (default: fixed_range)
+  JAGER_ENS_EPOCH_START
+                   jager_seeded fixed OOF start (default: ENS_EPOCH_START)
+  JAGER_ENS_EPOCH_END
+                   jager_seeded fixed OOF end (default: ENS_EPOCH_END)
+  JAGER_TAG        Optional jager_seeded base tag override, without OOF suffix
   RESUME           1 to skip jobs with .exit_code == 0 (default: 1)
   WANDB_ENABLED    1 to enable W&B logging (default: 0)
   WANDB_PROJECT    W&B project name (default: jager)
@@ -128,7 +149,7 @@ ENS_STRIDE="${ENS_STRIDE:-1}"
 BATCH="${BATCH:-8}"
 ACCUM="${ACCUM:-2}"
 MAXLEN="${MAXLEN:-808}"
-NUM_WORKERS="${NUM_WORKERS:-4}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 JAGER_DEBUG="${JAGER_DEBUG:-1}"
 HF_OFFLINE="${HF_OFFLINE:-1}"
@@ -164,6 +185,22 @@ CE_ENS_T="${CE_ENS_T:-$ENS_T}"
 CE_ENS_EPOCH_START="${CE_ENS_EPOCH_START:-8}"
 CE_ENS_EPOCH_END="${CE_ENS_EPOCH_END:-14}"
 PAIR_WINDOW_MATRIX="${PAIR_WINDOW_MATRIX:-1}"
+PAIR_INCLUDE_CE="${PAIR_INCLUDE_CE:-1}"
+JAGER_SEEDS="${JAGER_SEEDS:-42}"
+JAGER_JOINT="${JAGER_JOINT:-1}"
+JAGER_MIXTURE="${JAGER_MIXTURE:-0}"
+JAGER_CONF_GATING="${JAGER_CONF_GATING:-0}"
+JAGER_REASSIGNMENT="${JAGER_REASSIGNMENT:-0}"
+JAGER_LAMBDA0="${JAGER_LAMBDA0:-3}"
+JAGER_LAMBDA_MIN="${JAGER_LAMBDA_MIN:-0.5}"
+JAGER_C="${JAGER_C:-5e-2}"
+JAGER_EPOCHS="${JAGER_EPOCHS:-$EPOCHS}"
+JAGER_SCHED_EPOCHS="${JAGER_SCHED_EPOCHS:-$SCHED_EPOCHS}"
+JAGER_ENS_MODE="${JAGER_ENS_MODE:-fixed_range}"
+JAGER_ENS_T="${JAGER_ENS_T:-$ENS_T}"
+JAGER_ENS_EPOCH_START="${JAGER_ENS_EPOCH_START:-$ENS_EPOCH_START}"
+JAGER_ENS_EPOCH_END="${JAGER_ENS_EPOCH_END:-$ENS_EPOCH_END}"
+JAGER_TAG="${JAGER_TAG:-}"
 
 case "$ENS_MODE" in
   fixed_range|tail) ;;
@@ -246,6 +283,7 @@ fi
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export JAGeR_DEBUG="$JAGER_DEBUG"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+echo "[info] PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
 export TORCH_SHOW_CPP_STACKTRACES="${TORCH_SHOW_CPP_STACKTRACES:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export WANDB_DIR="${WANDB_DIR:-$RESULTS_ROOT/.wandb}"
@@ -279,8 +317,12 @@ case "$JOB_SET" in
     JOBS=()
     read -r -a PAIR_SEED_ARR <<<"$PAIR_SEEDS"
     ;;
+  jager_seeded)
+    JOBS=()
+    read -r -a JAGER_SEED_ARR <<<"$JAGER_SEEDS"
+    ;;
   *)
-    echo "ERROR: JOB_SET must be 'full', 'ce_only', 'ce_sweep', 'two_stage_joint', or 'leader_ce05_paired', got: $JOB_SET"
+    echo "ERROR: JOB_SET must be 'full', 'ce_only', 'ce_sweep', 'two_stage_joint', 'leader_ce05_paired', or 'jager_seeded', got: $JOB_SET"
     exit 1
     ;;
 esac
@@ -318,7 +360,11 @@ elif [[ "$JOB_SET" == "leader_ce05_paired" ]]; then
   echo "[info] PAIR_SEEDS=$PAIR_SEEDS"
   echo "[info] LEADER lambda0=$LEADER_LAMBDA0 C=$LEADER_C epochs=$LEADER_EPOCHS sched=$LEADER_SCHED_EPOCHS OOF=${LEADER_ENS_MODE}"
   echo "[info] CE smoothing=$CE_SMOOTHING epochs=$CE_EPOCHS sched=$CE_SCHED_EPOCHS OOF=${CE_ENS_MODE}"
-  echo "[info] PAIR_WINDOW_MATRIX=$PAIR_WINDOW_MATRIX"
+  echo "[info] PAIR_WINDOW_MATRIX=$PAIR_WINDOW_MATRIX PAIR_INCLUDE_CE=$PAIR_INCLUDE_CE"
+elif [[ "$JOB_SET" == "jager_seeded" ]]; then
+  echo "[info] JAGER_SEEDS=$JAGER_SEEDS"
+  echo "[info] JAGER joint=$JAGER_JOINT mixture=$JAGER_MIXTURE conf_gating=$JAGER_CONF_GATING reassignment=$JAGER_REASSIGNMENT"
+  echo "[info] JAGER lambda0=$JAGER_LAMBDA0 lambda_min=$JAGER_LAMBDA_MIN C=$JAGER_C epochs=$JAGER_EPOCHS sched=$JAGER_SCHED_EPOCHS OOF=${JAGER_ENS_MODE}"
 fi
 echo "[info] BATCH=$BATCH ACCUM=$ACCUM JOB_SET=$JOB_SET RESUME=$RESUME"
 echo "[info] WANDB_ENABLED=$WANDB_ENABLED WANDB_MODE=$WANDB_MODE WANDB_GROUP=$WANDB_GROUP"
@@ -503,7 +549,9 @@ for FOLD in "${FOLDS[@]}"; do
       if [[ "$PAIR_WINDOW_MATRIX" == "1" ]]; then
         PAIR_JOBS+=("leader:ce" "ce05:leader")
       fi
-      PAIR_JOBS+=("ce05:ce")
+      if [[ "$PAIR_INCLUDE_CE" == "1" ]]; then
+        PAIR_JOBS+=("ce05:ce")
+      fi
 
       for PAIR_SPEC in "${PAIR_JOBS[@]}"; do
         METHOD_KEY="${PAIR_SPEC%%:*}"
@@ -587,6 +635,87 @@ for FOLD in "${FOLDS[@]}"; do
         fi
         set -e
       done
+    done
+  elif [[ "$JOB_SET" == "jager_seeded" ]]; then
+    JOINT_ARG="--no-joint"
+    MIXTURE_ARG="--no-mixture"
+    CG_ARG="--no-conf_gating"
+    RA_ARG="--no-reassignment"
+    if [[ "$JAGER_JOINT" == "1" ]]; then
+      JOINT_ARG="--joint"
+    fi
+    if [[ "$JAGER_MIXTURE" == "1" ]]; then
+      MIXTURE_ARG="--mixture"
+    fi
+    if [[ "$JAGER_CONF_GATING" == "1" ]]; then
+      CG_ARG="--conf_gating"
+    fi
+    if [[ "$JAGER_REASSIGNMENT" == "1" ]]; then
+      RA_ARG="--reassignment"
+    fi
+
+    JAGER_WINDOW_TAG="T${JAGER_ENS_T}"
+    if [[ "$JAGER_ENS_MODE" == "fixed_range" ]]; then
+      JAGER_WINDOW_TAG="E${JAGER_ENS_EPOCH_START}-${JAGER_ENS_EPOCH_END}"
+    fi
+
+    if [[ -n "$JAGER_TAG" ]]; then
+      JAGER_BASE_TAG="$JAGER_TAG"
+    elif [[ "$JAGER_JOINT" == "0" && "$JAGER_MIXTURE" == "0" && "$JAGER_CONF_GATING" == "0" && "$JAGER_REASSIGNMENT" == "0" ]]; then
+      JAGER_BASE_TAG="jager-leader-bare-disjoint-lambda0-${JAGER_LAMBDA0}-C-${JAGER_C}"
+    elif [[ "$JAGER_JOINT" == "1" && "$JAGER_MIXTURE" == "1" && "$JAGER_CONF_GATING" == "0" && "$JAGER_REASSIGNMENT" == "0" ]]; then
+      JAGER_BASE_TAG="jager-leader-joint-mixture-nogate-noreassign-lambda0-${JAGER_LAMBDA0}-C-${JAGER_C}"
+    else
+      JAGER_BASE_TAG="jager-seeded-j${JAGER_JOINT}-m${JAGER_MIXTURE}-cg${JAGER_CONF_GATING}-ra${JAGER_REASSIGNMENT}-lambda0-${JAGER_LAMBDA0}-lambda_min-${JAGER_LAMBDA_MIN}-C-${JAGER_C}"
+    fi
+
+    TAG="${JAGER_BASE_TAG}-${JAGER_WINDOW_TAG}"
+    JOB_ARGS=(
+      --loss jager "$JOINT_ARG" "$MIXTURE_ARG" "$CG_ARG" "$RA_ARG"
+      --lambda0 "$JAGER_LAMBDA0" --lambda_min "$JAGER_LAMBDA_MIN" --C "$JAGER_C"
+    )
+
+    for SEED in "${JAGER_SEED_ARR[@]}"; do
+      SAVE="${RESULTS_ROOT}/seed${SEED}/${TAG}/fold${FOLD}"
+
+      mkdir -p "$SAVE"
+      LOG="$SAVE/train.log"
+      EXIT_CODE_FILE="$SAVE/.exit_code"
+
+      if [[ "$RESUME" == "1" && -f "$EXIT_CODE_FILE" ]]; then
+        prev_code="$(tr -d '[:space:]' < "$EXIT_CODE_FILE")"
+        if [[ "$prev_code" == "0" ]]; then
+          echo ">> [fold ${FOLD} seed ${SEED}] ${TAG} already completed successfully; skipping"
+          continue
+        fi
+      fi
+
+      echo ">> [fold ${FOLD} seed ${SEED}] ${TAG} -> $LOG"
+
+      set +e
+      make_common_args "$JAGER_EPOCHS" "$JAGER_SCHED_EPOCHS" "$JAGER_ENS_MODE" "$JAGER_ENS_EPOCH_START" "$JAGER_ENS_EPOCH_END" "$JAGER_ENS_T" "$ENS_STRIDE"
+      torchrun \
+        --nproc_per_node="$NPROC_PER_NODE" \
+        --master_port="$MASTER_PORT" \
+        "$SCRIPT_DIR/train.py" "${COMMON[@]}" \
+          --wandb_run_name "${RUN_ID}-seed${SEED}-fold${FOLD}-${TAG}" \
+          "${EXTRA_ARGS_ARR[@]}" \
+          "${JOB_ARGS[@]}" \
+          --seed "$SEED" \
+          --split_file "${SPLITS_DIR}/fold${FOLD}.json" \
+          --save_dir "$SAVE" \
+          >"$LOG" 2>&1
+
+      code=$?
+      echo "$code" > "$EXIT_CODE_FILE"
+
+      if [[ "$code" != 0 ]]; then
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        OVERALL_FAIL_COUNT=$((OVERALL_FAIL_COUNT + 1))
+        printf '%s\t%s\t%s\n' "seed${SEED}/${TAG}" "$code" "$LOG" >> "$FAIL_SUMMARY"
+        echo "!! [fold ${FOLD} seed ${SEED}] ${TAG} FAILED (code $code). See $LOG"
+      fi
+      set -e
     done
   else
   for job in "${JOBS[@]}"; do

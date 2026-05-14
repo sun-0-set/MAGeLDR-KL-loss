@@ -1,3 +1,4 @@
+# pyright: reportPossiblyUnboundVariable=false
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,10 +11,16 @@ def _cache(module: nn.Module, name: str, value: torch.Tensor) -> torch.Tensor:
   module.register_buffer(name, value, persistent=False)
   return getattr(module, name)
 
+def softplus_norm(x: torch.Tensor, joint: bool):
+  x = F.softplus(x)
+  x = x / x.sum(dim=(1, 2) if joint else 2, keepdim=True).clamp_min(1e-12) * (
+    x.shape[-1] ** x.shape[-2] if joint else x.shape[-1]
+  )
+  return x
+
 
 class JAGeRLoss(nn.Module):
 
-  
   def __init__ (
     self, 
     Y: torch.Tensor, # true label columns
@@ -30,15 +37,16 @@ class JAGeRLoss(nn.Module):
     λmin: float | None = None, # overrides α
     α: float = 2,
     C: float = 1,
+    LDAM: bool = True,
     debug: bool = False,
     log_to_wandb: bool = False,
     ):
       device = Y.device
 
       def _trunc_disc_norm_grid(K):
-        φ_sq_inv_halved: tuple[float, ...] = (0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486) # precomputed .5/φ(K)^2 for K=4..10; for K>10 approximate with .5
+        φ_sq_inv_halved: tuple[float, ...] = (0.25541281188299525, 0.4479398673070137, 0.4887300185352654, 0.4978993024239318, 0.4996875664596105, 0.49996397161691486) # precomputed .5/φ(K)^2 for K=4..9; for K>=10 approximate with .5
         k = torch.arange(K, device=device, dtype=torch.int16)
-        return F.softmax(-(φ_sq_inv_halved[K-4] if K<=10 else .5) * (k[:,None] - k).square(), dim=1, dtype=torch.float64)
+        return F.softmax(-(φ_sq_inv_halved[K-4] if K<10 else .5) * (k[:,None] - k).square(), dim=1, dtype=torch.float64)
 
 
         
@@ -200,7 +208,12 @@ class JAGeRLoss(nn.Module):
           .clamp_min(1)
           .rsqrt().sqrt()
           .mul(C)
-      )
+      ) if LDAM else torch.full(
+          ([1] * self.H) if joint else (1, 1),
+          C,
+          dtype=torch.float64,
+          device=device,
+        )
       self._base_thresholds: torch.Tensor
       self.register_buffer('_base_thresholds', _base.to(device))
 
@@ -442,12 +455,7 @@ class JAGeRLoss(nn.Module):
         factors = self.flat_factors
         R_max = self.R_max
       
-    y_pred = F.softplus(y_pred)
-    if joint:
-      y_pred = y_pred / y_pred.sum(dim=(1, 2), keepdim=True).clamp_min(1e-12) * KpowH
-    else:
-      y_pred = y_pred / y_pred.sum(dim=2, keepdim=True).clamp_min(1e-12) * K
-    
+    y_pred = softplus_norm(y_pred, joint)
 
     with torch.no_grad():
       log_p_h = (y_pred / (λ[..., None, None] if joint else λ[..., None])).log_softmax(dim=2)
@@ -610,12 +618,12 @@ class JAGeRLoss(nn.Module):
           log_υ = log_S
       
       if joint:
-        thresholds = self._base_thresholds.reshape(1, -1).expand(B, -1)
+        thresholds = self._base_thresholds.reshape(1, -1).expand(B, KpowH)
         flat_idx_label = (Y * self.flat_factors).sum(1, keepdim=True)
         if reassignment:
           flat_idx_mode = (_mode * self.flat_factors).sum(1, keepdim=True)
       else:
-        thresholds = self._base_thresholds.unsqueeze(0).expand(B, *self._base_thresholds.shape)
+        thresholds = self._base_thresholds.unsqueeze(0).expand(B, H, K)
         _1hot_label = F.one_hot(Y, K).to(thresholds.dtype)
         if reassignment:
           _1hot_pred_max = F.one_hot(_mode, K).to(thresholds.dtype)
@@ -684,11 +692,18 @@ class JAGeRLoss(nn.Module):
 
 class MultiHeadCELoss(nn.Module):
 
-  def __init__(self, Y: torch.Tensor, level_offset: int = 1, label_smoothing: float = 0.0):
+  def __init__(self, Y: torch.Tensor, level_offset: int = 1, label_smoothing: float = 0.0, softplus_norm: bool = False, joint: bool = False):
     super().__init__()
     self.Y = _cache(self, 'Y', (Y - level_offset).long())
     self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
+    self.joint = joint
+    self.softplus_norm = softplus_norm
 
   def forward(self, y_pred: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
     Y = self.Y[ids]
+    joint = self.joint
+    if self.softplus_norm:
+      y_pred = softplus_norm(y_pred, joint)
+    if joint:
+      pass
     return self.ce(y_pred.mT, Y)
