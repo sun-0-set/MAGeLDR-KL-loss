@@ -30,6 +30,7 @@ class JAGeRLoss(nn.Module):
     stats_ids: torch.Tensor | None = None, # row ids whose labels define train-only class stats; defaults to all rows
     joint: bool = True,
     mixture: bool = True,
+    kurtosis: bool = True,
     conf_gating: bool = True,
     reassignment: bool = True,
     level_offset: int = 0, 
@@ -347,10 +348,36 @@ class JAGeRLoss(nn.Module):
     
     pass
 
-  def _estimate_ρ_uvar(self, ν, β2, probs):
+  def _estimate_ρ_from_σ2_uvar(self, ν, σ2, probs):
+    ν = ν.long()
+    δm_sq = self.δm_sq[ν]
+    δv = self.δv[ν]
+    ρ0 = self.ρ0[ν]
+    r0 = self.r0[ν]
+    msk = self.eq_m1[ν]
+    Kπminus1 = self.Kπminus1[ν]
+    logK = self.logK
+
+    ρ = torch.empty_like(ν, dtype=torch.float64)  # Initialize ρ tensor
+
+    # Case 1: equal mean (linear)
+    ρ[msk] = σ2[msk]/δv[msk] - ρ0[msk]
+
+    # Case 2: general (quadratic)
+    D = (σ2[~msk]/δm_sq[~msk]-r0[~msk]).sqrt_()
+
+    var_quad_roots = ρ0[~msk].unsqueeze(-1) + torch.stack([D,-D], dim=-1)
+    var_quad_roots = var_quad_roots.clamp(0, 1)
+
+    log_υ_roots = (var_quad_roots.unsqueeze(-1) * Kπminus1[~msk].unsqueeze(-2)).log1p() - logK  
+    ce = self._ce(probs[~msk].unsqueeze(-2), log_υ_roots)
+    idx = ce.argmin(dim=-1)  
+    ρ[~msk] = var_quad_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
+    return ρ
+
+  def _estimate_ρ_from_β2_uvar(self, ν, β2, probs):
 
     ν = ν.long()
-    β2 = β2.clamp_min(self.ε)
 
     # Gather per-ν constants (broadcast to (B, H))
     msk = self.eq_m1[ν]
@@ -447,12 +474,13 @@ class JAGeRLoss(nn.Module):
     B = y_pred.shape[0]
     λ = self.λ[ids]
     
-    joint, mixture, reassignment, conf_gating = self.joint, self.mixture, self.reassignment, self.conf_gating 
+    joint, mixture, kurtosis, reassignment, conf_gating = self.joint, self.mixture, self.kurtosis, self.reassignment, self.conf_gating 
     
     if joint:
       KpowH, HlogK = self.KpowH, self.HlogK
       if mixture:
         factors = self.flat_factors
+        kurtosis = self.kurtosis
         R_max = self.R_max
       
     y_pred = softplus_norm(y_pred, joint)
@@ -497,7 +525,8 @@ class JAGeRLoss(nn.Module):
             ρ[active] = torch.minimum(ρ_next, ρ_hi_eval[active])
         else:
           mean, _var, _skew, _kurt = self._cent_moments(p_h) 
-          ρ = self._estimate_ρ_uvar(_mode, _kurt / _var.square().clamp_min(ε), p_h)
+          ρ = self._estimate_ρ_from_β2_uvar(_mode, _kurt / _var.square().clamp_min(ε), p_h) if kurtosis\
+              else self._estimate_ρ_from_σ2_uvar(_mode, _var.clamp_min(ε), p_h)
       
         if conf_gating:
           # ρ gated update 
@@ -692,18 +721,14 @@ class JAGeRLoss(nn.Module):
 
 class MultiHeadCELoss(nn.Module):
 
-  def __init__(self, Y: torch.Tensor, level_offset: int = 1, label_smoothing: float = 0.0, softplus_norm: bool = False, joint: bool = False):
+  def __init__(self, Y: torch.Tensor, level_offset: int = 1, label_smoothing: float = 0.0, softplus_norm_coupling: bool = False, joint: bool = False):
     super().__init__()
     self.Y = _cache(self, 'Y', (Y - level_offset).long())
     self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
-    self.joint = joint
-    self.softplus_norm = softplus_norm
+    self.softplus_norm_coupling = softplus_norm_coupling
 
   def forward(self, y_pred: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
     Y = self.Y[ids]
-    joint = self.joint
-    if self.softplus_norm:
-      y_pred = softplus_norm(y_pred, joint)
-    if joint:
-      pass
+    if self.softplus_norm_coupling:
+      y_pred = softplus_norm(y_pred, True)
     return self.ce(y_pred.mT, Y)
