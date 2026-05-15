@@ -355,10 +355,12 @@ def parse_args():
     # --- Loss family / hyperparameters --------------------------------
     p.add_argument("--loss", choices=["jager", "ce"], default="jager",
                    help="jager = JAGeR, ce = cross-entropy")
-    p.add_argument("--joint", action=argparse.BooleanOptionalAction, default=True,
-                   help="JAGeR: use joint K^H space (--no-joint for per-head)")
+    p.add_argument("--joint", action=argparse.BooleanOptionalAction, default=None,
+                   help="use joint K^H space; defaults on for JAGeR and off for CE")
     p.add_argument("--mixture", action=argparse.BooleanOptionalAction, default=True,
                    help="JAGeR: enable mixture prior / ρ estimation")
+    p.add_argument("--kurtosis", action=argparse.BooleanOptionalAction, default=True,
+                   help="JAGeR: estimate ρ by matching kurtosis instead of variance")
     p.add_argument("--conf_gating", action=argparse.BooleanOptionalAction, default=True,
                    help="JAGeR: enable confidence-gated ρ update")
     p.add_argument("--reassignment", action=argparse.BooleanOptionalAction, default=True,
@@ -370,6 +372,7 @@ def parse_args():
     p.add_argument("--ldam", action=argparse.BooleanOptionalAction, default=True,
                help="JAGeR: use count-scaled label-distributionally aware margins; --no-ldam uses constant C")
     p.add_argument("--ce_label_smoothing", type=float, default=0.0, help="label smoothing for CE baseline")
+    p.add_argument("--ce_softplus_norm", action="store_true", help="CE baseline: softplus-normalize logits before CE")
 
     # --- Evaluation / run modes ---------------------------------------
     p.add_argument("--eval_test", action="store_true",
@@ -696,6 +699,8 @@ def _load_tokenizer_strict(model_name: str):
 
 def main():
     args = parse_args()
+    if args.joint is None:
+        args.joint = args.loss == "jager"
     
     # Force-safe flags when mixture=0
     if args.loss == "jager" and not args.mixture:
@@ -981,8 +986,11 @@ def main():
         else:
             loss_fn = MultiHeadCELoss(
                 Y = Y_all,
+                K = K,
                 level_offset = args.level_offset,
-                label_smoothing=args.ce_label_smoothing
+                label_smoothing=args.ce_label_smoothing,
+                softplus_norm_coupling=bool(args.ce_softplus_norm),
+                joint=bool(args.joint),
             ).to(device)
 
         def _loss_state_for_ckpt(loss_obj):
@@ -1011,7 +1019,7 @@ def main():
             keys = [
                 "loss", "joint", "mixture", "conf_gating", "reassignment",
                 "lambda0", "lambda_min", "alpha", "C",
-                "ce_label_smoothing", "seed",
+                "ce_label_smoothing", "ce_softplus_norm", "seed",
                 "model_name", "init_model_from", "max_length", "batch_size",
                 "grad_accum", "epochs", "sched_epochs",
                 "ens_mode", "ens_epoch_start", "ens_epoch_end", "ens_t", "ens_stride",

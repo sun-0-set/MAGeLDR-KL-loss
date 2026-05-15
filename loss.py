@@ -1,4 +1,5 @@
 # pyright: reportPossiblyUnboundVariable=false
+from typing import Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -30,7 +31,7 @@ class JAGeRLoss(nn.Module):
     stats_ids: torch.Tensor | None = None, # row ids whose labels define train-only class stats; defaults to all rows
     joint: bool = True,
     mixture: bool = True,
-    kurtosis: bool = True,
+    kurtosis: bool = True, # estimate ρ by matching kurtosis instead of variance
     conf_gating: bool = True,
     reassignment: bool = True,
     level_offset: int = 0, 
@@ -49,7 +50,124 @@ class JAGeRLoss(nn.Module):
         k = torch.arange(K, device=device, dtype=torch.int16)
         return F.softmax(-(φ_sq_inv_halved[K-4] if K<10 else .5) * (k[:,None] - k).square(), dim=1, dtype=torch.float64)
 
+      def _estimate_ρ_from_σ2_uvar(self, ν, σ2, probs):
+        ν = ν.long()
+        δm_sq = self.δm_sq[ν]
+        δv = self.δv[ν]
+        ρ0 = self.ρ0[ν]
+        r0 = self.r0[ν]
+        msk = self.eq_m1[ν]
+        Kπminus1 = self.Kπminus1[ν]
+        logK = self.logK
 
+        ρ = torch.empty_like(ν, dtype=torch.float64)  # Initialize ρ tensor
+
+        # Case 1: equal mean (linear)
+        ρ[msk] = σ2[msk]/δv[msk] - ρ0[msk]
+
+        # Case 2: general (quadratic)
+        D = (r0[~msk] - σ2[~msk]/δm_sq[~msk]).sqrt_()
+
+        var_quad_roots = ρ0[~msk].unsqueeze(-1) + torch.stack([D,-D], dim=-1)
+        var_quad_roots = var_quad_roots.clamp(0, 1)
+
+        log_υ_roots = (var_quad_roots.unsqueeze(-1) * Kπminus1[~msk].unsqueeze(-2)).log1p() - logK  
+        ce = self._ce(probs[~msk].unsqueeze(-2), log_υ_roots)
+        idx = ce.argmin(dim=-1)  
+        ρ[~msk] = var_quad_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
+
+        return ρ
+
+      def _estimate_ρ_from_β2_uvar(self, ν, β2, probs):
+
+        ν = ν.long()
+
+        # Gather per-ν constants (broadcast to (B, H))
+        msk = self.eq_m1[ν]
+        δv = self.δv[ν]  # (B, H)
+        Ku = self.Ku[ν]
+        δK = self.δK[ν]
+        ρ0 = self.ρ0[ν]
+        r0 = self.r0[ν]
+        Kπminus1 = self.Kπminus1[ν]
+        logK = self.logK
+
+        ρ = torch.empty_like(ν, dtype=torch.float64)  # Initialize ρ tensor
+
+
+        # Case 1: equal mean (quadratic)
+        b = δK[msk] / (2 * δv[msk].square() * β2[msk])
+        D = (b.square() + (Ku[msk] - δK[msk]*ρ0[msk]) / (δv[msk].square() * β2[msk])).clamp_min(0).sqrt()
+        kurt_quad_roots = (b - ρ0[msk]).unsqueeze(-1) + torch.stack((-D, D), dim=1)  # (M,2)
+        kurt_quad_roots = kurt_quad_roots.clamp(0, 1)
+        
+        log_υ_roots = (kurt_quad_roots.unsqueeze(-1) * Kπminus1[msk].unsqueeze(1)).log1p() - logK  # (M,2,K)
+        
+        ce = self._ce(probs[msk].unsqueeze(1), log_υ_roots)  # (M,2)
+        idx = ce.argmin(dim=1)  # (M,)
+        
+        ρ[msk] = kurt_quad_roots.gather(1, idx.unsqueeze(-1)).squeeze(-1)
+
+
+        # Case 2: general (quartic) — only compute for ~msk elements
+        nmsk = ~msk
+        if nmsk.any():
+          coef_K0 = self.coef_K[0][ν][nmsk]
+          coef_K1 = self.coef_K[1][ν][nmsk]
+          coef_K2 = self.coef_K[2][ν][nmsk]
+          β2_n = β2[nmsk]
+          r0_n = r0[nmsk]
+          ρ0_n = ρ0[nmsk]
+          Kπminus1_n = Kπminus1[nmsk]
+          probs_n = probs[nmsk]
+          _13rd = self._13rd
+          _cbrt = self._cbrt
+          
+          den = 1 + β2_n * _13rd
+          p = -(coef_K2 - 2 * β2_n * r0_n * _13rd) * .5 / den
+          q = (coef_K1 * .5) / den
+          r = -(coef_K0 + β2_n * r0_n.square() * _13rd) / den
+
+          p13 = p * _13rd
+          p2 = p13 * p13
+          f = r * _13rd - p2
+          g = p13 * (2 * p2 - r) + p * r - .5 * q.square()
+          h = .25 * g.square() + f * f * f
+
+          mask_h = h <= 0
+          # h <= 0 branch
+          l = f.abs().sqrt()
+          acos_arg = torch.clamp(.5 * g / (f * l), -1.0, 1.0)
+          m_res = (acos_arg.acos() * _13rd).cos()
+          cr1 = 2 * l * m_res - p13
+          # h > 0 branch
+          sqrt_h = h.clamp_min(0).sqrt()
+          cr2 = _cbrt(-0.5 * g + sqrt_h) + _cbrt(-0.5 * g - sqrt_h) - p13
+          cr = torch.where(mask_h, cr1, cr2)
+
+          s = (2 * (p + cr)).clamp_min(0).sqrt()
+          s_nz = s != 0
+          t = torch.empty_like(s)
+          t[s_nz] = -q[s_nz] / s[s_nz]
+          t[~s_nz] = cr[~s_nz] * cr[~s_nz] + r[~s_nz]
+          s = s*.5
+
+          s2 = s.square()
+
+          kurt_quart_roots = torch.stack([
+            -s - (s2 - cr - t).clamp_min(0).sqrt(),
+            -s + (s2 - cr - t).clamp_min(0).sqrt(),
+            s - (s2 - cr + t).clamp_min(0).sqrt(),
+            s + (s2 - cr + t).clamp_min(0).sqrt()
+          ], dim=-1) + ρ0_n.unsqueeze(-1) 
+          kurt_quart_roots = kurt_quart_roots.clamp(0, 1)
+
+          log_υ_roots = (kurt_quart_roots.unsqueeze(-1) * Kπminus1_n.unsqueeze(-2)).log1p() - logK  
+          ce = self._ce(probs_n.unsqueeze(-2), log_υ_roots)
+          idx = ce.argmin(dim=-1)  
+          ρ[nmsk] = kurt_quart_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
+
+        return ρ
         
       super().__init__()
       
@@ -75,8 +193,13 @@ class JAGeRLoss(nn.Module):
       
       self.joint = joint 
       self.mixture = mixture
+      self.kurtosis = kurtosis
       self.reassignment = reassignment
       self.conf_gating = conf_gating
+
+      self.estimate_ρ = lambda _mode, _var, _kurt, p_h:\
+         _estimate_ρ_from_β2_uvar(self, _mode, _kurt / _var.square().clamp_min(self.ε), p_h) if kurtosis else\
+         _estimate_ρ_from_σ2_uvar(self, _mode, _var.clamp_min(self.ε), p_h)
       
       self.Y = _cache(self, 'Y', (Y - level_offset).long().to(device))
       self.N, self.H = self.Y.shape
@@ -124,11 +247,11 @@ class JAGeRLoss(nn.Module):
           k = torch.arange(K, device=device, dtype=torch.long)
           self.D = D = _cache(self, 'D', (k[:,None] - k).square_())
           self.R_max = R_max = (K-1)**2
-          z = (-D * (φ_sq_inv_halved[K-4] if K<=10 else .5)).exp_().sum(1)
+          z = (-D * (φ_sq_inv_halved[K-4] if K<10 else .5)).exp_().sum(1)
           Z = z.clone()
           for _ in range(1, self.H):
             Z = Z.unsqueeze(-1) * z
-          ker_shell = (-(φ_sq_inv_halved[K-4] if K<=10 else .5) * torch.arange(self.H * R_max + 1, device=device, dtype=torch.float64)).exp_()
+          ker_shell = (-(φ_sq_inv_halved[K-4] if K<10 else .5) * torch.arange(self.H * R_max + 1, device=device, dtype=torch.float64)).exp_()
           self.Kπ = _cache(self,'Kπ',KpowH * ker_shell.view(*[1] * self.H, self.H * R_max + 1) / Z.unsqueeze(-1),)
         else:
           π = _trunc_disc_norm_grid(K)
@@ -348,124 +471,6 @@ class JAGeRLoss(nn.Module):
     
     pass
 
-  def _estimate_ρ_from_σ2_uvar(self, ν, σ2, probs):
-    ν = ν.long()
-    δm_sq = self.δm_sq[ν]
-    δv = self.δv[ν]
-    ρ0 = self.ρ0[ν]
-    r0 = self.r0[ν]
-    msk = self.eq_m1[ν]
-    Kπminus1 = self.Kπminus1[ν]
-    logK = self.logK
-
-    ρ = torch.empty_like(ν, dtype=torch.float64)  # Initialize ρ tensor
-
-    # Case 1: equal mean (linear)
-    ρ[msk] = σ2[msk]/δv[msk] - ρ0[msk]
-
-    # Case 2: general (quadratic)
-    D = (σ2[~msk]/δm_sq[~msk]-r0[~msk]).sqrt_()
-
-    var_quad_roots = ρ0[~msk].unsqueeze(-1) + torch.stack([D,-D], dim=-1)
-    var_quad_roots = var_quad_roots.clamp(0, 1)
-
-    log_υ_roots = (var_quad_roots.unsqueeze(-1) * Kπminus1[~msk].unsqueeze(-2)).log1p() - logK  
-    ce = self._ce(probs[~msk].unsqueeze(-2), log_υ_roots)
-    idx = ce.argmin(dim=-1)  
-    ρ[~msk] = var_quad_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
-    return ρ
-
-  def _estimate_ρ_from_β2_uvar(self, ν, β2, probs):
-
-    ν = ν.long()
-
-    # Gather per-ν constants (broadcast to (B, H))
-    msk = self.eq_m1[ν]
-    δv = self.δv[ν]  # (B, H)
-    Ku = self.Ku[ν]
-    δK = self.δK[ν]
-    ρ0 = self.ρ0[ν]
-    r0 = self.r0[ν]
-    Kπminus1 = self.Kπminus1[ν]
-    logK = self.logK
-
-    ρ = torch.empty_like(ν, dtype=torch.float64)  # Initialize ρ tensor
-
-
-    # Case 1: equal mean (quadratic)
-    b = δK[msk] / (2 * δv[msk].square() * β2[msk])
-    D = (b.square() + (Ku[msk] - δK[msk]*ρ0[msk]) / (δv[msk].square() * β2[msk])).clamp_min(0).sqrt()
-    kurt_quad_roots = (b - ρ0[msk]).unsqueeze(-1) + torch.stack((-D, D), dim=1)  # (M,2)
-    kurt_quad_roots = kurt_quad_roots.clamp(0, 1)
-    
-    log_υ_roots = (kurt_quad_roots.unsqueeze(-1) * Kπminus1[msk].unsqueeze(1)).log1p() - logK  # (M,2,K)
-    
-    ce = self._ce(probs[msk].unsqueeze(1), log_υ_roots)  # (M,2)
-    idx = ce.argmin(dim=1)  # (M,)
-    
-    ρ[msk] = kurt_quad_roots.gather(1, idx.unsqueeze(-1)).squeeze(-1)
-
-
-    # Case 2: general (quartic) — only compute for ~msk elements
-    nmsk = ~msk
-    if nmsk.any():
-      coef_K0 = self.coef_K[0][ν][nmsk]
-      coef_K1 = self.coef_K[1][ν][nmsk]
-      coef_K2 = self.coef_K[2][ν][nmsk]
-      β2_n = β2[nmsk]
-      r0_n = r0[nmsk]
-      ρ0_n = ρ0[nmsk]
-      Kπminus1_n = Kπminus1[nmsk]
-      probs_n = probs[nmsk]
-      _13rd = self._13rd
-      _cbrt = self._cbrt
-      
-      den = 1 + β2_n * _13rd
-      p = -(coef_K2 - 2 * β2_n * r0_n * _13rd) * .5 / den
-      q = (coef_K1 * .5) / den
-      r = -(coef_K0 + β2_n * r0_n.square() * _13rd) / den
-
-      p13 = p * _13rd
-      p2 = p13 * p13
-      f = r * _13rd - p2
-      g = p13 * (2 * p2 - r) + p * r - .5 * q.square()
-      h = .25 * g.square() + f * f * f
-
-      mask_h = h <= 0
-      # h <= 0 branch
-      l = f.abs().sqrt()
-      acos_arg = torch.clamp(.5 * g / (f * l), -1.0, 1.0)
-      m_res = (acos_arg.acos() * _13rd).cos()
-      cr1 = 2 * l * m_res - p13
-      # h > 0 branch
-      sqrt_h = h.clamp_min(0).sqrt()
-      cr2 = _cbrt(-0.5 * g + sqrt_h) + _cbrt(-0.5 * g - sqrt_h) - p13
-      cr = torch.where(mask_h, cr1, cr2)
-
-      s = (2 * (p + cr)).clamp_min(0).sqrt()
-      s_nz = s != 0
-      t = torch.empty_like(s)
-      t[s_nz] = -q[s_nz] / s[s_nz]
-      t[~s_nz] = cr[~s_nz] * cr[~s_nz] + r[~s_nz]
-      s = s*.5
-
-      s2 = s.square()
-
-      kurt_quart_roots = torch.stack([
-        -s - (s2 - cr - t).clamp_min(0).sqrt(),
-        -s + (s2 - cr - t).clamp_min(0).sqrt(),
-        s - (s2 - cr + t).clamp_min(0).sqrt(),
-        s + (s2 - cr + t).clamp_min(0).sqrt()
-      ], dim=-1) + ρ0_n.unsqueeze(-1) 
-      kurt_quart_roots = kurt_quart_roots.clamp(0, 1)
-
-      log_υ_roots = (kurt_quart_roots.unsqueeze(-1) * Kπminus1_n.unsqueeze(-2)).log1p() - logK  
-      ce = self._ce(probs_n.unsqueeze(-2), log_υ_roots)
-      idx = ce.argmin(dim=-1)  
-      ρ[nmsk] = kurt_quart_roots.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
-
-    return ρ
-
 
   def forward(self, y_pred, ids, update_state: bool = True, global_step: int | None = None):
     # y_pred: (B, H, n_levels)
@@ -525,8 +530,7 @@ class JAGeRLoss(nn.Module):
             ρ[active] = torch.minimum(ρ_next, ρ_hi_eval[active])
         else:
           mean, _var, _skew, _kurt = self._cent_moments(p_h) 
-          ρ = self._estimate_ρ_from_β2_uvar(_mode, _kurt / _var.square().clamp_min(ε), p_h) if kurtosis\
-              else self._estimate_ρ_from_σ2_uvar(_mode, _var.clamp_min(ε), p_h)
+          ρ = self.estimate_ρ(_mode, _var, _kurt, p_h)
       
         if conf_gating:
           # ρ gated update 
@@ -721,14 +725,40 @@ class JAGeRLoss(nn.Module):
 
 class MultiHeadCELoss(nn.Module):
 
-  def __init__(self, Y: torch.Tensor, level_offset: int = 1, label_smoothing: float = 0.0, softplus_norm_coupling: bool = False, joint: bool = False):
+  def __init__(self, Y: torch.Tensor, K: Union[int, None] = None, level_offset: int = 1, label_smoothing: float = 0.0, softplus_norm_coupling: bool = False, joint: bool = False):
     super().__init__()
     self.Y = _cache(self, 'Y', (Y - level_offset).long())
+    self.N, self.H = self.Y.shape
     self.ce = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction="mean")
     self.softplus_norm_coupling = softplus_norm_coupling
+    self.joint = joint
+    if joint:
+      assert K, "K must be provided when joint is True."
+      self.K = int(K)
+      self.KpowH = self.K ** self.H
+      self.flat_factors = _cache(
+        self,
+        'ce_flat_factors',
+        self.K ** torch.arange(self.H - 1, -1, -1, device=self.Y.device, dtype=torch.long)
+      )
+
+  def _outer_sum(self, x: torch.Tensor) -> torch.Tensor:
+    B = x.shape[0]
+    joint = x[:, 0]
+    for h in range(1, self.H):
+      joint = (joint.unsqueeze(-1) + x[:, h].unsqueeze(1)).reshape(B, -1)
+    return joint
+
+  def _joint_one_hot(self, Y: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    flat_idx = (Y * self.flat_factors).sum(1)
+    return F.one_hot(flat_idx, self.KpowH).to(dtype)
 
   def forward(self, y_pred: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
     Y = self.Y[ids]
     if self.softplus_norm_coupling:
-      y_pred = softplus_norm(y_pred, True)
+      y_pred = softplus_norm(y_pred, self.joint)
+    if self.joint:
+      joint_logits = self._outer_sum(y_pred)
+      target = self._joint_one_hot(Y, joint_logits.dtype)
+      return self.ce(joint_logits, target)
     return self.ce(y_pred.mT, Y)

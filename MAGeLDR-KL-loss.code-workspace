@@ -1,0 +1,30 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../results/k6_promptcv"
+		}
+	],
+	"settings": {
+		"python.useEnvironmentsExtension": false,
+		"python.defaultInterpreterPath": "/scratchdata1/users/a1841939/myconda/envs/jager-cv/bin/python",
+		"python.terminal.activateEnvironment": false,
+		"terminal.integrated.enablePersistentSessions": false,
+		"terminal.integrated.env.linux": {
+			"CONDA_AUTO_ACTIVATE_BASE": "false"
+		},
+		"terminal.integrated.profiles.linux": {
+			"bash (jager-cv)": {
+				"path": "bash",
+				"args": [
+					"-ic",
+					"export CONDA_AUTO_ACTIVATE_BASE=false; conda activate jager-cv; exec bash -i"
+				]
+			}
+		},
+		"terminal.integrated.defaultProfile.linux": "bash (jager-cv)",
+		"chatgpt.openOnStartup": true
+	}
+}

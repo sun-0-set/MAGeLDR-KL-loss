@@ -368,29 +368,3 @@ class EssayDataset(Dataset):
     @property
     def target_cols(self) -> list[str]:
         return list(self.label_cols)
-
-
-# Backwards-compatible aliases for old code paths
-TARGET_COLS = None
-
-
-class DRESSDataset(EssayDataset):
-    """Alias kept so old imports still work."""
-
-    def __init__(
-        self,
-        tsv_path: str,
-        tokenizer_name: str = "microsoft/deberta-v3-large",
-        max_length: int = 1600,
-        tokenizer=None,
-        token_cache_dir: Optional[str] = None,
-    ):
-        super().__init__(
-            path=tsv_path,
-            tokenizer_name=tokenizer_name,
-            max_length=max_length,
-            tokenizer=tokenizer,
-            prompt_col=DEFAULT_PROMPT_COL,
-            essay_col=DEFAULT_ESSAY_COL,
-            token_cache_dir=token_cache_dir,
-        )
